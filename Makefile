@@ -1,4 +1,4 @@
-# One static binary: no cgo, no external Go modules.
+# One static binary: no cgo.
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
 build:
