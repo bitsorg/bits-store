@@ -27,7 +27,8 @@ def raw_pub(k): return k.public_key().public_bytes(serialization.Encoding.Raw, s
 
 
 def sign_raw(header_json, payload_json, k, enc="utf-8"):
-    si = b64(header_json.encode()) + "." + b64(payload_json.encode(enc))
+    payload = payload_json if isinstance(payload_json, bytes) else payload_json.encode(enc)
+    si = b64(header_json.encode()) + "." + b64(payload)
     return si + "." + b64(k.sign(si.encode()))
 
 
@@ -78,6 +79,7 @@ def gen():
         ("iat-at-leeway-edge", T(iat=NOW + 60, exp=NOW + 3600), G, P, "allow"),
         ("max-lifetime-exact", T(iat=NOW - 600, exp=NOW - 600 + MAX_LIFE), G, P, "allow"),
         ("unknown-claim-ignored", T(note={"a": 1}), G, P, "allow"),
+        ("unknown-claim-huge-number", sign_raw(json.dumps(HDR), pj[:-1] + ', "x": 1e400, "y": ' + "9" * 400 + '}', k1), G, P, "allow"),
         ("build-key-build-sub", sign(dict(HDR, kid="build-1"), claims(sub="build:123"), kb), G, P, "allow"),
         ("segment-255", C({"m": G, "p": "/s/" + "x" * 255}), G, "/s/" + "x" * 255, "allow"),
         ("max-length", exact, G, P, "allow"),
@@ -145,6 +147,9 @@ def gen():
         ("iat-negative", T(iat=-1), G, P, "invalid"),
         ("iat-min-int64", T(iat=-2 ** 63), G, P, "invalid"),
         ("exp-exponent", sign_raw(json.dumps(HDR), pj.replace('"exp": %d' % (NOW + 3600), '"exp": 1.8000036e9'), k1), G, P, "invalid"),
+        ("non-ascii-unknown-claim", sign_raw(json.dumps(HDR), pj[:-1] + ', "\u00e9": 1}', k1), G, P, "invalid"),
+        ("payload-invalid-utf8", sign_raw(json.dumps(HDR), pj.replace('"alice"', '"alice\\xff"').encode().replace(b"\\xff", b"\xff"), k1), G, P, "invalid"),
+        ("nan-claim", sign_raw(json.dumps(HDR), pj[:-1] + ', "x": NaN}', k1), G, P, "invalid"),
         ("long-s-claim", sign_raw(json.dumps(HDR), pj[:-1] + ', "\u017fub": "build:1"}', k1), G, P, "invalid"),
         ("nbf-present", T(nbf=NOW - 600), G, P, "invalid"),
         ("wrong-audience", T(aud="other-site/store"), G, P, "invalid"),
@@ -252,6 +257,10 @@ def strict_object(pairs):
     return dict(pairs)
 
 
+def no_constant(name):
+    raise Bad("not JSON: " + name)  # NaN, Infinity
+
+
 def unb64(s):
     if not re.fullmatch(r"[A-Za-z0-9_-]*", s) or len(s) % 4 == 1:
         raise Bad("base64url")
@@ -272,7 +281,8 @@ def verify(token, v):
             or token.count(".") != 2:
         raise Bad("form")
     h, p, s = token.split(".")
-    load = lambda x: json.loads(unb64(x).decode("utf-8"), object_pairs_hook=strict_object)
+    load = lambda x: json.loads(unb64(x).decode("utf-8"), object_pairs_hook=strict_object,
+                                parse_constant=no_constant)
     header = load(h)
     if not isinstance(header, dict) or set(header) != {"alg", "typ", "kid"} \
             or header["alg"] != "EdDSA" or header["typ"] != TYP:
