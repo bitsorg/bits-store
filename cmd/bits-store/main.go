@@ -41,7 +41,8 @@ func main() {
 		addr = ":8080"
 	}
 	srv := &http.Server{Addr: addr, Handler: s, ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 2 * time.Minute,
+		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, // a promote extends its own
+		IdleTimeout:    2 * time.Minute,
 		MaxHeaderBytes: 16 << 10}
 	log.Printf("bits-store %s listening on %s", version, addr)
 	if err := srv.ListenAndServe(); err != nil {

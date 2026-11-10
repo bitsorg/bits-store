@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package server answers store requests: it checks the path and token
-// (docs/TOKEN.md) and redirects GET and HEAD to presigned S3 URLs.
+// (docs/TOKEN.md), redirects GET and HEAD to presigned URLs, and takes writes
+// through staging (upload.go).
 package server
 
 import (
@@ -9,15 +10,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/minio/minio-go/v7"
-	"github.com/minio/minio-go/v7/pkg/credentials"
-	"github.com/minio/minio-go/v7/pkg/s3utils"
 
 	"github.com/bitsorg/bits-store/internal/token"
 )
@@ -28,16 +23,16 @@ const (
 	minURLExpiry = time.Second
 )
 
-// Server is safe for concurrent requests: everything but the token cache is
-// read-only after New.
+// Server is safe for concurrent requests: the token cache and the upload table
+// have their own locks; the rest is read-only after New.
 type Server struct {
 	verifier *token.Verifier
 	bindings []Binding
-	clients  map[string]*minio.Client // nil: an anonymous volume, served by plain URL
-	volumes  map[string]VolumeConf
+	stores   map[string]objectStore
 	urlLife  time.Duration
 	now      func() time.Time
 	cache    tokenCache
+	uploads  uploadTable
 }
 
 // New builds a Server from a checked configuration.
@@ -54,40 +49,19 @@ func New(c *Config) (*Server, error) {
 	if err != nil || life < minURLExpiry || life > time.Hour {
 		return nil, fmt.Errorf("url_lifetime: between 1s and 1h")
 	}
-	s := &Server{verifier: v, bindings: bs, clients: map[string]*minio.Client{},
-		volumes: c.Volumes, urlLife: life, now: time.Now}
+	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, urlLife: life, now: time.Now}
 	for name, vol := range c.Volumes {
-		if s.clients[name], err = vol.client(); err != nil {
+		if s.stores[name], err = vol.store(); err != nil {
 			return nil, fmt.Errorf("volume %q: %v", name, err)
 		}
 	}
 	for _, b := range bs {
 		// a public binding must never presign with the service's keys
-		if b.Public != (s.clients[b.Volume] == nil) {
+		if b.Public != s.stores[b.Volume].Anonymous() {
 			return nil, fmt.Errorf("binding %q: public bindings need an anonymous volume, private ones a volume with keys", b.Prefix)
 		}
 	}
 	return s, nil
-}
-
-func (v VolumeConf) client() (*minio.Client, error) {
-	u, err := url.Parse(v.Endpoint)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
-		u.Path != "" && u.Path != "/" || !(u.Scheme == "https" || u.Scheme == "http" && v.AllowHTTP) {
-		return nil, fmt.Errorf("endpoint: an https://host URL needed (http only with allow_http)")
-	}
-	if s3utils.CheckValidBucketNameStrict(v.Bucket) != nil || v.Region == "" {
-		return nil, fmt.Errorf("a valid bucket and a region needed (the region spares a lookup)")
-	}
-	if v.AccessKeyEnv == "" && v.SecretKeyEnv == "" {
-		return nil, nil // anonymous: public objects only
-	}
-	ak, sk := os.Getenv(v.AccessKeyEnv), os.Getenv(v.SecretKeyEnv)
-	if ak == "" || sk == "" {
-		return nil, fmt.Errorf("%s or %s is empty", v.AccessKeyEnv, v.SecretKeyEnv)
-	}
-	creds := credentials.NewStaticV4(ak, sk, "")
-	return minio.New(u.Host, &minio.Options{Creds: creds, Secure: u.Scheme == "https", Region: v.Region})
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -102,77 +76,74 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("%s %s %q %d %s", r.RemoteAddr, r.Method, p, code, who)
 }
 
-func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *token.Token, p string) {
-	fail := func(c int) (int, *token.Token, string) {
-		if c == http.StatusUnauthorized {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-		}
-		http.Error(w, http.StatusText(c), c)
-		return c, t, p
+func fail(w http.ResponseWriter, c int) int {
+	if c == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", "Bearer")
 	}
+	http.Error(w, http.StatusText(c), c)
+	return c
+}
+
+func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *token.Token, p string) {
 	// The path exactly as sent, never Go's decoded r.URL.Path (docs/TOKEN.md).
-	p, _, _ = strings.Cut(r.RequestURI, "?")
+	p, rawQuery, _ := strings.Cut(r.RequestURI, "?")
 	if p == "/health" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 		fmt.Fprintln(w, "ok")
 		return http.StatusOK, nil, p
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
-		return fail(http.StatusMethodNotAllowed)
+	write := r.Method == http.MethodPost
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !write {
+		w.Header().Set("Allow", "GET, HEAD, POST")
+		return fail(w, http.StatusMethodNotAllowed), nil, p
 	}
 	segs, err := token.ParsePath(p)
 	if err != nil {
-		return fail(http.StatusBadRequest)
+		return fail(w, http.StatusBadRequest), nil, p
 	}
 	b, key := s.resolve(segs)
 	now := s.now()
-	expiry := s.urlLife
-	if b == nil || !b.Public {
+	if b == nil || !b.Public || write {
 		// the token comes before 404, so no one learns the bindings without one
 		tok := bearer(r)
 		if tok == "" {
-			return fail(http.StatusUnauthorized)
+			return fail(w, http.StatusUnauthorized), nil, p
 		}
 		if t, err = s.verify(tok, now); err != nil {
 			log.Printf("%s %s %q: %v", r.RemoteAddr, r.Method, p, err) // logged, never sent back
-			return fail(http.StatusUnauthorized)
+			return fail(w, http.StatusUnauthorized), nil, p
 		}
 		if b == nil {
-			return fail(http.StatusNotFound)
+			return fail(w, http.StatusNotFound), t, p
 		}
-		if !t.Allows(r.Method, segs) {
-			return fail(http.StatusForbidden)
+		method := r.Method
+		if write {
+			method = http.MethodPut
 		}
+		if !t.Allows(method, segs) {
+			return fail(w, http.StatusForbidden), t, p
+		}
+	}
+	if write {
+		if b.Public {
+			return fail(w, http.StatusMethodNotAllowed), t, p
+		}
+		return s.write(w, r, rawQuery, b, key, t, now), t, p
+	}
+	expiry := s.urlLife
+	if t != nil {
 		if left := time.Unix(t.Exp, 0).Sub(now); left < expiry {
 			expiry = max(left, minURLExpiry) // a URL never outlives its token
 		}
 	}
-	loc, err := s.location(b.Volume, r.Method, key, expiry, r)
+	loc, err := s.stores[b.Volume].Presign(r.Context(), r.Method, key, expiry, nil)
 	if err != nil {
 		log.Printf("presign %s: %v", key, err)
-		return fail(http.StatusBadGateway)
+		return fail(w, http.StatusBadGateway), t, p
 	}
 	w.Header().Set("Location", loc)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusFound)
 	return http.StatusFound, t, p
-}
-
-// location is a presigned URL, or for an anonymous volume the plain path-style URL.
-func (s *Server) location(volume, method, key string, expiry time.Duration, r *http.Request) (string, error) {
-	vol := s.volumes[volume]
-	if c := s.clients[volume]; c != nil {
-		u, err := c.Presign(r.Context(), method, vol.Bucket, key, expiry, nil)
-		if err != nil {
-			return "", err
-		}
-		return u.String(), nil
-	}
-	segs := strings.Split(key, "/")
-	for i, seg := range segs {
-		segs[i] = strings.ReplaceAll(url.PathEscape(seg), "+", "%2B") // S3 may read + as space
-	}
-	return strings.TrimSuffix(vol.Endpoint, "/") + "/" + url.PathEscape(vol.Bucket) + "/" + strings.Join(segs, "/"), nil
 }
 
 // resolve finds the binding with the longest prefix and the object key under it.

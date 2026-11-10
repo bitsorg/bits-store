@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"sort"
 	"strings"
@@ -104,6 +105,15 @@ func (c *Config) bindings() ([]Binding, error) {
 	}
 	seen := map[string]bool{}
 	byBucket := map[string][]string{} // endpoint and bucket -> key prefixes
+	where := func(v VolumeConf) string {
+		return normEndpoint(v.Endpoint) + " " + v.Bucket
+	}
+	staged := map[string]bool{} // buckets a keyed volume writes STAGING/ into
+	for _, v := range c.Volumes {
+		if v.AccessKeyEnv != "" {
+			staged[where(v)] = true
+		}
+	}
 	out := make([]Binding, 0, len(c.Bindings))
 	for _, b := range c.Bindings {
 		segs, err := token.ParsePath(b.Prefix)
@@ -119,13 +129,15 @@ func (c *Config) bindings() ([]Binding, error) {
 				return nil, fmt.Errorf("binding %q: key_prefix breaks the path rules", b.Prefix)
 			}
 		}
-		where := strings.ToLower(strings.TrimSuffix(vol.Endpoint, "/")) + " " + vol.Bucket
-		for _, other := range byBucket[where] {
+		if staged[where(vol)] && overlap(b.KeyPrefix, stagingPrefix) {
+			return nil, fmt.Errorf("binding %q: key_prefix overlaps the staging prefix %s", b.Prefix, stagingPrefix)
+		}
+		for _, other := range byBucket[where(vol)] {
 			if overlap(other, b.KeyPrefix) {
 				return nil, fmt.Errorf("binding %q: key_prefix %q overlaps %q in the same bucket", b.Prefix, b.KeyPrefix, other)
 			}
 		}
-		byBucket[where] = append(byBucket[where], b.KeyPrefix)
+		byBucket[where(vol)] = append(byBucket[where(vol)], b.KeyPrefix)
 		seen[b.Prefix] = true
 		b.segs = segs
 		out = append(out, b)
@@ -138,4 +150,17 @@ func (c *Config) bindings() ([]Binding, error) {
 // to, or a whole-segment prefix of the other.
 func overlap(a, b string) bool {
 	return a == "" || b == "" || a == b || strings.HasPrefix(a, b+"/") || strings.HasPrefix(b, a+"/")
+}
+
+// normEndpoint spells an endpoint one way: lower-case host, no default port.
+func normEndpoint(e string) string {
+	u, err := url.Parse(e)
+	if err != nil {
+		return e
+	}
+	host := strings.ToLower(u.Hostname())
+	if p := u.Port(); p != "" && !(u.Scheme == "https" && p == "443" || u.Scheme == "http" && p == "80") {
+		host += ":" + p
+	}
+	return u.Scheme + "://" + host
 }

@@ -19,6 +19,25 @@ type vectors struct {
 	Cases            []struct{ Name, Token string }
 }
 
+// tokenNamed returns the token of a named vector case.
+func tokenNamed(t *testing.T, name string) string {
+	b, err := os.ReadFile("../../testdata/tokens/vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v vectors
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range v.Cases {
+		if c.Name == name {
+			return c.Token
+		}
+	}
+	t.Fatalf("no case %s", name)
+	return ""
+}
+
 // setup serves the test vectors' issuer and keys; good is the vectors' first token
 // (GET /store/lhcb/x86_64-el10*/**, GET /sources/archives/*, expires at now+3600).
 func setup(t *testing.T) (s *Server, good string, now time.Time) {
@@ -192,6 +211,10 @@ func TestConfigRefused(t *testing.T) {
 		},
 		"no-bindings":       func(c *Config) { c.Bindings = nil },
 		"max-lifetime-zero": func(c *Config) { c.MaxLifetime = "0s" },
+		"public-over-staging": func(c *Config) {
+			c.Volumes["k"] = VolumeConf{Endpoint: "https://s3.example.org", Bucket: "bucket", Region: "r", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}
+			c.Bindings[0].KeyPrefix = "STAGING"
+		},
 	} {
 		c := base()
 		change(c)
