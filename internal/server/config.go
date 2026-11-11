@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bitsorg/bits-store/internal/format"
 	"github.com/bitsorg/bits-store/internal/token"
 )
 
@@ -47,14 +48,16 @@ type VolumeConf struct {
 	AllowHTTP    bool   `json:"allow_http"` // a test MinIO; never for real keys
 }
 
-// Binding maps a logical prefix to a volume and key prefix. Public bindings
-// need no token.
+// Binding maps a logical prefix to a volume and key prefix; its format names
+// the objects under it. Public bindings need no token.
 type Binding struct {
 	Prefix    string `json:"prefix"`     // "/sources/archives"
 	Volume    string `json:"volume"`     // a key of Volumes
 	KeyPrefix string `json:"key_prefix"` // "SOURCES/cache"; empty: bucket root
+	Format    string `json:"format"`     // empty: "blob", the path is the key
 	Public    bool   `json:"public"`
 	segs      []string
+	format    format.Format
 }
 
 // LoadConfig reads and checks a configuration file.
@@ -136,6 +139,13 @@ func (c *Config) bindings() ([]Binding, error) {
 			if overlap(other, b.KeyPrefix) {
 				return nil, fmt.Errorf("binding %q: key_prefix %q overlaps %q in the same bucket", b.Prefix, b.KeyPrefix, other)
 			}
+		}
+		if b.Format == "" {
+			b.Format = "blob"
+		}
+		if b.format, ok = format.Lookup(b.Format); !ok {
+			return nil, fmt.Errorf("binding %q: no format %q (have %s)", b.Prefix, b.Format,
+				strings.Join(format.Names(), ", "))
 		}
 		byBucket[where(vol)] = append(byBucket[where(vol)], b.KeyPrefix)
 		seen[b.Prefix] = true

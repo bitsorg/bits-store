@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -123,6 +124,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 			return fail(w, http.StatusForbidden), t, p
 		}
 	}
+	if key == "" {
+		return fail(w, http.StatusNotFound), t, p // the binding's format found nothing
+	}
 	if write {
 		if b.Public {
 			return fail(w, http.StatusMethodNotAllowed), t, p
@@ -146,7 +150,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 	return http.StatusFound, t, p
 }
 
-// resolve finds the binding with the longest prefix and the object key under it.
+// resolve finds the binding with the longest prefix and the object key under
+// it; the key is empty when the binding's format finds no object.
 func (s *Server) resolve(segs []string) (*Binding, string) {
 	for i := range s.bindings {
 		b := &s.bindings[i]
@@ -161,11 +166,19 @@ func (s *Server) resolve(segs []string) (*Binding, string) {
 			}
 		}
 		if match {
-			rest := strings.Join(segs[len(b.segs):], "/")
-			if b.KeyPrefix == "" {
-				return b, rest
+			// a format's key stays within the path rules, so under its key prefix
+			it, err := b.format.Route(slices.Clone(segs[len(b.segs):]))
+			if err != nil {
+				return b, ""
 			}
-			return b, b.KeyPrefix + "/" + rest
+			if _, err := token.ParsePath("/" + it.Key); err != nil {
+				log.Printf("format %s: bad key %q", b.Format, it.Key)
+				return b, ""
+			}
+			if b.KeyPrefix == "" {
+				return b, it.Key
+			}
+			return b, b.KeyPrefix + "/" + it.Key
 		}
 	}
 	return nil, ""

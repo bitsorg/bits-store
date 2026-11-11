@@ -4,12 +4,15 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bitsorg/bits-store/internal/format"
 )
 
 type vectors struct {
@@ -38,6 +41,26 @@ func tokenNamed(t *testing.T, name string) string {
 	return ""
 }
 
+// Test formats: one naming a key outside the path rules, one naming nothing.
+type escapeFormat struct{}
+
+func (escapeFormat) Name() string { return "test-escape" }
+func (escapeFormat) Route([]string) (format.Item, error) {
+	return format.Item{Key: "../x"}, nil
+}
+
+type noneFormat struct{}
+
+func (noneFormat) Name() string { return "test-none" }
+func (noneFormat) Route([]string) (format.Item, error) {
+	return format.Item{}, errors.New("nothing")
+}
+
+func init() {
+	format.Register(escapeFormat{})
+	format.Register(noneFormat{})
+}
+
 // setup serves the test vectors' issuer and keys; good is the vectors' first token
 // (GET /store/lhcb/x86_64-el10*/**, GET /sources/archives/*, expires at now+3600).
 func setup(t *testing.T) (s *Server, good string, now time.Time) {
@@ -53,14 +76,18 @@ func setup(t *testing.T) (s *Server, good string, now time.Time) {
 	}
 	c := &Config{Issuer: v.Issuer, Audience: v.Audience, Keys: v.Keys,
 		Volumes: map[string]VolumeConf{
-			"s3":  {Endpoint: "https://s3.example.org", Bucket: "bits", Region: "us-east-1", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"},
-			"pub": {Endpoint: "https://s3.example.org", Bucket: "open", Region: "us-east-1"},
+			"s3":   {Endpoint: "https://s3.example.org", Bucket: "bits", Region: "us-east-1", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"},
+			"pub":  {Endpoint: "https://s3.example.org", Bucket: "open", Region: "us-east-1"},
+			"pub2": {Endpoint: "https://s3.example.org", Bucket: "open2", Region: "us-east-1"},
 		},
 		Bindings: []Binding{
 			{Prefix: "/store/lhcb", Volume: "s3", KeyPrefix: "TARS"},
 			{Prefix: "/store/lhcb/x86_64-el10", Volume: "s3", KeyPrefix: "EL10"},
 			{Prefix: "/sources/archives", Volume: "s3", KeyPrefix: "SOURCES/cache"},
 			{Prefix: "/public", Volume: "pub", Public: true},
+			{Prefix: "/store/lhcb/x86_64-el10-esc", Volume: "s3", KeyPrefix: "ESC", Format: "test-escape"},
+			{Prefix: "/test/none", Volume: "pub2", Public: true, Format: "test-none"},
+			{Prefix: "/test/none-private", Volume: "s3", KeyPrefix: "NONE", Format: "test-none"},
 		}}
 	if s, err = New(c); err != nil {
 		t.Fatal(err)
@@ -107,6 +134,10 @@ func TestRequests(t *testing.T) {
 		{"cookie", "GET", "/sources/archives/x", map[string]string{"Cookie": cookieName + "=" + good}, 302, "/bits/SOURCES/cache/x"},
 		{"header-wins-over-cookie", "GET", "/sources/archives/x", map[string]string{"Authorization": "Basic eDp5", "Cookie": cookieName + "=" + good}, 401, ""},
 		{"put-not-yet", "PUT", "/sources/archives/x", auth, 405, ""},
+		{"format-key-escapes", "GET", "/store/lhcb/x86_64-el10-esc/x", auth, 404, ""},
+		{"format-key-escapes-no-token", "GET", "/store/lhcb/x86_64-el10-esc/x", nil, 401, ""},
+		{"format-no-capability-first", "GET", "/test/none-private/x", auth, 403, ""},
+		{"format-finds-nothing-public", "GET", "/test/none/x", nil, 404, ""},
 	} {
 		w := do(s, c.method, c.target, c.hdr)
 		if w.Code != c.code {
@@ -210,6 +241,7 @@ func TestConfigRefused(t *testing.T) {
 			c.Volumes["v"] = VolumeConf{Endpoint: "https://s3.example.org", Bucket: "B_ad", Region: "r"}
 		},
 		"no-bindings":       func(c *Config) { c.Bindings = nil },
+		"unknown-format":    func(c *Config) { c.Bindings[0].Format = "nope" },
 		"max-lifetime-zero": func(c *Config) { c.MaxLifetime = "0s" },
 		"public-over-staging": func(c *Config) {
 			c.Volumes["k"] = VolumeConf{Endpoint: "https://s3.example.org", Bucket: "bucket", Region: "r", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}

@@ -10,6 +10,9 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
 - `bits-store -config config.json`: see `config.example.json`. A binding maps a
   logical prefix to a volume and key prefix; GET and HEAD are redirected to presigned
   URLs (plain URLs for public bindings, which must use an anonymous volume).
+- A binding's `format` (`internal/format`) names the objects under its prefix;
+  `blob`, the default, uses the path as the key. Formats are compiled in and
+  register themselves; each has conformance cases in `format_test.go`.
 - Writes go through staging; a client never gets a URL for a final key:
   `POST <path>?uploads` with `{"size", "md5" (base64), "sha256" (hex)}` returns a
   presigned `PUT` into `STAGING/<id>` and the headers to send; after the upload,
