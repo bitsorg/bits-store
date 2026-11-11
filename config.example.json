@@ -1,5 +1,5 @@
 {
- "listen": ":8080",
+ "listen": ":8098",
  "issuer": "https://bits.example.org",
  "audience": "example-site/store",
  "max_lifetime": "168h",

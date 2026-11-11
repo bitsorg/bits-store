@@ -22,6 +22,12 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `declared-sha256`. Up to 5 GiB for now. First-writer-wins needs a single instance
   (the lease is in memory) and bits-store as the bucket's only writer. Give the bucket
   a lifecycle rule expiring `STAGING/` after a day.
+- Container: `make image` builds `bits-store:<version>`, the static binary alone in an
+  empty image, as user 65532, listening on 8098 (the default when the configuration
+  sets no `listen`). Mount the configuration at `/etc/bits-store/config.json` and give
+  the S3 keys in the environment its volumes name; for a site CA, mount it and set
+  `SSL_CERT_FILE`. `bits-store -health URL` is its health check; the image checks
+  port 8098, so a `listen` on another port needs the health check changed too.
 - `go test -run TestS3 ./internal/server` runs reads and writes against a real S3
   endpoint when `BITS_STORE_S3IT_*` is set (see `internal/server/s3_test.go`).
 - Clients send paths unencoded: the allowed punctuation (`~+!@=,:`) as is, since a `%`
