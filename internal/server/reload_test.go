@@ -60,6 +60,8 @@ func TestReloadTakesAGoodConfigAndKeepsTheRunningOneOverABadOne(t *testing.T) {
 	if ok, err := r.Check(); ok || err != nil || get() != 404 {
 		t.Fatalf("unchanged file: reloaded %v, %v; GET %d, want 404", ok, err, get())
 	}
+	running := &fetchJob{done: make(chan struct{})}
+	s.fetches.m = map[string]*fetchJob{"failed": {until: now.Add(time.Hour)}, "running": running}
 	c.Bindings = append(c.Bindings, Binding{Prefix: "/store/lhcb", Volume: "s3", KeyPrefix: "TARS"})
 	writeConfig(t, path, c)
 	if ok, err := r.Check(); !ok || err != nil || get() != 302 {
@@ -67,6 +69,9 @@ func TestReloadTakesAGoodConfigAndKeepsTheRunningOneOverABadOne(t *testing.T) {
 	}
 	if r.cur.Load().uploads != s.uploads || r.cur.Load().fetches != s.fetches {
 		t.Fatal("pending uploads or fetches did not carry over")
+	}
+	if s.fetches.m["failed"] != nil || s.fetches.m["running"] != running {
+		t.Fatal("remembered failures kept, or a running fetch dropped")
 	}
 	c.Bindings = append(c.Bindings, Binding{Prefix: "/store/atlas", Volume: "nowhere"})
 	writeConfig(t, path, c)

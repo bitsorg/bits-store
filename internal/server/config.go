@@ -29,7 +29,18 @@ type Config struct {
 	Keys        map[string]KeyConfig  `json:"keys"`
 	Volumes     map[string]VolumeConf `json:"volumes"`
 	Bindings    []Binding             `json:"bindings"`
-	FetchDeny   []string              `json:"fetch_deny"` // CIDRs a fetch must not reach, e.g. a site's own
+	Fetch       FetchConf             `json:"fetch"`
+	AccessLog   string                `json:"access_log"` // all, errors (default: and writes) or none
+}
+
+// FetchConf says where fetches may go (fetch.go). Site addresses (private ones and
+// site_ranges) only for site_hosts; hosts outside trusted have a daily budget.
+type FetchConf struct {
+	SiteRanges []string `json:"site_ranges"`           // CIDRs of the site network
+	SiteHosts  []string `json:"site_hosts"`            // host names on it a fetch may reach
+	Trusted    []string `json:"trusted"`               // domains fetched from without a budget
+	PerSubject int      `json:"untrusted_per_subject"` // fetches a day, per token subject; 0: 100
+	PerDomain  int      `json:"untrusted_per_domain"`  // fetches a day, per domain; 0: 100
 }
 
 // KeyConfig is a token signing key: raw Ed25519 public key, base64url.
@@ -165,8 +176,6 @@ func (c *Config) bindings() ([]Binding, error) {
 		}
 		b.mirror, _ = b.format.(format.Mirror)
 		switch {
-		case b.mirror != nil && b.Public:
-			return nil, fmt.Errorf("binding %q: format %s fetches, so the binding must be private", b.Prefix, b.Format)
 		case b.mirror == nil && b.MaxSize != 0:
 			return nil, fmt.Errorf("binding %q: max_size is for formats that fetch", b.Prefix)
 		case b.MaxSize < 0 || b.MaxSize > maxFetch:

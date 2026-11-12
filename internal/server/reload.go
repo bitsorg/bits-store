@@ -22,7 +22,7 @@ func CheckConfig(path string) error {
 
 // Reloader serves with the current Server and rebuilds it when the configuration
 // file's content changes. A configuration that fails the checks is logged once and
-// the running one kept. Pending uploads and fetches carry over; cached tokens do not.
+// the running one kept. Pending uploads and fetches carry over; cached tokens and failures do not.
 type Reloader struct {
 	path string
 	seen [32]byte // the content last tried
@@ -68,6 +68,7 @@ func (r *Reloader) Check() (bool, error) {
 		return false, err
 	}
 	s.uploads, s.fetches, s.now = old.uploads, old.fetches, old.now
+	s.fetches.forgetFailures() // the new policy may allow what failed
 	r.cur.Store(s)
 	return true, nil
 }

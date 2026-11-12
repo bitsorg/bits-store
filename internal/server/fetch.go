@@ -14,21 +14,18 @@ import (
 	"hash"
 	"io"
 	"log"
-	"net"
 	"net/http"
-	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/bitsorg/bits-store/internal/format"
 	"github.com/bitsorg/bits-store/internal/token"
 )
 
-// Fetches for a Mirror binding (sources): README. A miss is fetched once, from a
-// public address only (checked on each connection), into staging, then promoted.
+// Fetches for a Mirror binding (sources): README. A miss is fetched once, where
+// the policy allows (policy.go), into staging, then promoted.
 const (
 	fetchPart          = 16 << 20 // streamed to the volume in parts of at least this
 	maxFetch           = 1 << 40  // a binding's max_size at most
@@ -53,7 +50,8 @@ func (e fetchError) Error() string { return string(e) }
 var (
 	errBusy      = errors.New("the name is being promoted")
 	errCut       = fetchError("the origin's answer was cut off or stalled")
-	errNotPublic = fetchError("the origin's address is not public, or is denied")
+	errThrottled = errors.New("the day's budget for the domain or subject is spent")
+	errFull      = errors.New("too many fetches running")
 )
 
 type fetchJob struct {
@@ -63,23 +61,26 @@ type fetchJob struct {
 	until time.Time // a failure is remembered until then
 }
 
-// fetchTable holds running fetches and recent failures, by volume place and key.
-// A reload shares it, like the upload table.
+// fetchTable holds running fetches, recent failures and the day's counts of
+// untrusted fetches. A reload shares it, like the upload table.
 type fetchTable struct {
-	mu sync.Mutex
-	m  map[string]*fetchJob
+	mu              sync.Mutex
+	m               map[string]*fetchJob
+	day             string
+	bySub, byDomain map[string]int
 }
 
-// join returns the key's running or failed fetch, or a new one (fresh true) when
-// there is room: nil when there is not. Failures take no room.
-func (ft *fetchTable) join(k, sub string, now time.Time) (job *fetchJob, fresh bool) {
+// join returns the key's running or failed fetch, or a new one (fresh true):
+// errFull when there is no room (failures take none), errThrottled when budget,
+// the policy of an untrusted domain, is spent for the day.
+func (ft *fetchTable) join(k, sub, domain string, budget *fetchPolicy, now time.Time) (job *fetchJob, fresh bool, err error) {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
 	if ft.m == nil {
 		ft.m = map[string]*fetchJob{}
 	}
 	if j := ft.m[k]; j != nil && (j.until.IsZero() || now.Before(j.until)) {
-		return j, false
+		return j, false, nil
 	}
 	running, mine := 0, 0
 	for jk, j := range ft.m {
@@ -94,11 +95,21 @@ func (ft *fetchTable) join(k, sub string, now time.Time) (job *fetchJob, fresh b
 		}
 	}
 	if running >= maxFetching || mine >= maxFetchPerSubject {
-		return nil, false
+		return nil, false, errFull
+	}
+	if budget != nil {
+		if day := now.UTC().Format(time.DateOnly); day != ft.day {
+			ft.day, ft.bySub, ft.byDomain = day, map[string]int{}, map[string]int{}
+		}
+		if ft.bySub[sub] >= budget.perSubject || ft.byDomain[domain] >= budget.perDomain {
+			return nil, false, errThrottled
+		}
+		ft.bySub[sub]++
+		ft.byDomain[domain]++
 	}
 	j := &fetchJob{sub: sub, done: make(chan struct{})}
 	ft.m[k] = j
-	return j, true
+	return j, true, nil
 }
 
 // finish records a fetch's outcome: a failure is remembered for failTTL while
@@ -119,6 +130,16 @@ func (ft *fetchTable) finish(k string, j *fetchJob, err error, now time.Time) {
 	}
 	ft.mu.Unlock()
 	close(j.done)
+}
+
+func (ft *fetchTable) forgetFailures() {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	for k, j := range ft.m {
+		if !j.until.IsZero() {
+			delete(ft.m, k)
+		}
+	}
 }
 
 func failDetail(w http.ResponseWriter, code int, msg, detail string) int {
@@ -148,18 +169,33 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 	} else if ok {
 		return s.redirect(w, r, b, key, t, now)
 	}
+	host := strings.ToLower(strings.TrimSuffix(urlHost(src), "."))
+	var budget *fetchPolicy
+	if !s.policy.isTrusted(host) {
+		budget = s.policy
+	}
 	k := s.place[b.Volume] + "\x00" + key
-	job, fresh := s.fetches.join(k, t.Sub, now)
-	if job == nil {
+	who := fmt.Sprintf("sub=%q grp=%q jti=%q", t.Sub, t.Grp, t.Jti)
+	job, fresh, err := s.fetches.join(k, t.Sub, domainOf(host), budget, now)
+	switch {
+	case errors.Is(err, errThrottled):
+		log.Printf("fetch %s from %s for %s: throttled", key, src, who)
+		midnight := now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
+		w.Header().Set("Retry-After", fmt.Sprint(int(midnight.Sub(now).Seconds())+1))
+		return failMsg(w, http.StatusTooManyRequests, "throttled")
+	case err != nil:
 		w.Header().Set("Retry-After", "30")
 		return failMsg(w, http.StatusServiceUnavailable, "full")
 	}
 	if fresh {
-		log.Printf("fetch %s for sub=%q from %s", key, t.Sub, src)
+		log.Printf("fetch %s from %s for %s", key, src, who)
 		go func() {
-			err := s.fetch(b.Volume, b.MaxSize, key, src)
+			start := time.Now()
+			n, err := s.fetch(b.Volume, b.MaxSize, key, src, t.Sub)
 			if err != nil {
-				log.Printf("fetch %s from %s: %v", key, src, err)
+				log.Printf("fetch %s from %s for %s failed after %d bytes, %s: %v", key, src, who, n, time.Since(start).Round(time.Millisecond), err)
+			} else {
+				log.Printf("fetched %s from %s for %s: %d bytes in %s", key, src, who, n, time.Since(start).Round(time.Millisecond))
 			}
 			s.fetches.finish(k, job, err, s.now())
 		}()
@@ -194,29 +230,29 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 	return s.redirect(w, r, b, key, t, now)
 }
 
-// fetch streams src into staging, computing its checksums, and promotes it to key.
-// Another object already at key is a success: the first writer won.
-func (s *Server) fetch(volume string, maxSize int64, key, src string) error {
+// fetch streams src into staging, computing its checksums, and promotes it to key:
+// the bytes read. Another object already at key is a success: the first writer won.
+func (s *Server) fetch(volume string, maxSize int64, key, src, sub string) (n int64, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
 	stall := time.AfterFunc(fetchStall, cancel)
 	defer stall.Stop()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("User-Agent", "bits-store")
 	resp, err := s.fetchClient.Do(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fetchError(fmt.Sprintf("the origin answered %d", resp.StatusCode))
+		return 0, fetchError(fmt.Sprintf("the origin answered %d", resp.StatusCode))
 	}
 	tooLarge := fetchError(fmt.Sprintf("larger than the binding's max_size, %d bytes", maxSize))
 	if resp.ContentLength > maxSize {
-		return tooLarge
+		return 0, tooLarge
 	}
 	idb := make([]byte, 16)
 	rand.Read(idb)
@@ -235,24 +271,24 @@ func (s *Server) fetch(volume string, maxSize int64, key, src string) error {
 	err = st.Put(ctx, staging, body, part, map[string]string{"bits-upload": id})
 	switch {
 	case body.over:
-		return tooLarge // no object: a failed multipart upload is aborted
+		return body.n, tooLarge // no object: a failed multipart upload is aborted
 	case body.cut != nil:
-		return fmt.Errorf("%w: %v", errCut, body.cut)
+		return body.n, fmt.Errorf("%w: %v", errCut, body.cut)
 	case err != nil:
-		return err
+		return body.n, err
 	}
 	sum := hex.EncodeToString(body.sha.Sum(nil))
 	u := &upload{volume: volume, key: key, staging: staging, size: body.n, fetched: true,
 		md5Hex: hex.EncodeToString(body.md5.Sum(nil)), sha256: sum,
-		meta: map[string]string{"sha256": sum, "source-url": src}}
+		meta: map[string]string{"sha256": sum, "source-url": src, "fetched-by": url.PathEscape(sub)}}
 	switch code, msg := s.promote(context.Background(), u, id, s.now()); {
 	case code == http.StatusCreated || msg == "exists":
-		return nil
+		return body.n, nil
 	case msg == "busy":
 		remove()
-		return errBusy
+		return body.n, errBusy
 	default:
-		return fmt.Errorf("promote: %d %s", code, msg) // staging may be kept: the lifecycle rule
+		return body.n, fmt.Errorf("promote: %d %s", code, msg) // staging may be kept: the lifecycle rule
 	}
 }
 
@@ -291,80 +327,11 @@ func (f *fetchBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// newFetchClient connects to allowed addresses only and sends no Accept-Encoding,
-// so the bytes stored are the bytes served.
-func newFetchClient(deny []netip.Prefix) *http.Client {
-	control := func(_, address string, _ syscall.RawConn) error {
-		ap, err := netip.ParseAddrPort(address)
-		if err != nil {
-			return err
-		}
-		if !fetchAllowed(ap.Addr().Unmap(), deny) {
-			return errNotPublic // the address is in the log, not the answer
-		}
-		return nil
-	}
-	return &http.Client{Transport: &http.Transport{
-		Proxy:                 nil,
-		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, Control: control}).DialContext,
-		ForceAttemptHTTP2:     true,
-		TLSHandshakeTimeout:   30 * time.Second,
-		ResponseHeaderTimeout: time.Minute,
-		DisableCompression:    true,
-		MaxIdleConns:          maxFetching,
-		IdleConnTimeout:       90 * time.Second,
-	}}
-}
-
-// fetchAllowed: public, not the host's own, not in the configured fetch_deny.
-var fetchAllowed = func(a netip.Addr, deny []netip.Prefix) bool {
-	for _, p := range deny {
-		if p.Contains(a) {
-			return false
-		}
-	}
-	return public(a) && !own(a)
-}
-
-var interfaceAddrs = net.InterfaceAddrs // tests give public ones
-
-// own reports whether a is one of the host's addresses.
-func own(a netip.Addr) bool {
-	addrs, err := interfaceAddrs()
+// urlHost is the host of a URL Origin accepted.
+func urlHost(src string) string {
+	u, err := url.Parse(src)
 	if err != nil {
-		return true
+		return ""
 	}
-	for _, x := range addrs {
-		if n, ok := x.(*net.IPNet); ok {
-			if b, ok := netip.AddrFromSlice(n.IP); ok && b.Unmap() == a {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-var global6 = netip.MustParsePrefix("2000::/3")
-
-// nonPublic are global-looking ranges that are not, or that embed IPv4 addresses.
-var nonPublic = []netip.Prefix{
-	netip.MustParsePrefix("0.0.0.0/8"), netip.MustParsePrefix("100.64.0.0/10"),
-	netip.MustParsePrefix("192.0.0.0/24"), netip.MustParsePrefix("198.18.0.0/15"),
-	netip.MustParsePrefix("240.0.0.0/4"), netip.MustParsePrefix("2001::/32"),
-	netip.MustParsePrefix("2002::/16"),
-}
-
-// public reports whether an address is on the public internet: not private,
-// loopback, link-local, multicast or reserved.
-func public(a netip.Addr) bool {
-	a = a.Unmap()
-	if !a.IsGlobalUnicast() || a.IsPrivate() || a.Is6() && !global6.Contains(a) {
-		return false
-	}
-	for _, p := range nonPublic {
-		if p.Contains(a) {
-			return false
-		}
-	}
-	return true
+	return u.Hostname()
 }

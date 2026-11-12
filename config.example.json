@@ -13,10 +13,12 @@
               "access_key_env": "BITS_STORE_S3_ACCESS_KEY", "secret_key_env": "BITS_STORE_S3_SECRET_KEY"},
   "cern-s3-public": {"endpoint": "https://s3.cern.ch", "bucket": "lcgapp-bits-public", "region": "us-east-1"}
  },
- "fetch_deny": ["137.138.0.0/16", "128.141.0.0/16", "128.142.0.0/16", "188.184.0.0/15", "2001:1458::/32"],
+ "fetch": {"site_ranges": ["137.138.0.0/16", "128.141.0.0/16", "128.142.0.0/16", "188.184.0.0/15", "2001:1458::/32"],
+           "site_hosts": ["gitlab.cern.ch", "lcgpackages.web.cern.ch"],
+           "trusted": ["cern.ch", "github.com", "gitlab.com", "gnu.org", "pypi.org", "pythonhosted.org"]},
  "bindings": [
   {"prefix": "/manifests", "volume": "cern-s3-public", "key_prefix": "MANIFESTS", "public": true},
   {"prefix": "/sources/archives", "volume": "cern-s3", "key_prefix": "SOURCES/cache", "format": "sources",
-   "max_size": 34359738368}
+   "public": true, "max_size": 34359738368}
  ]
 }

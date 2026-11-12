@@ -9,7 +9,7 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `testdata/tokens/` (`python3 testdata/tokens/vectors.py check`).
 - `bits-store -config config.json`: see `config.example.json`. A binding maps a
   logical prefix to a volume and key prefix; GET and HEAD are redirected to presigned
-  URLs (plain URLs for public bindings, which must use an anonymous volume).
+  URLs (plain URLs for public bindings, which use an anonymous volume, sources aside).
 - `bits-store -check -config config.json` checks a configuration as a start would
   (the volumes' key variables set). The running service reloads its configuration
   when the file changes (`-reload-every`, 5s); one that fails the checks is logged and
@@ -22,16 +22,28 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
 - `sources` is bits' source cache, `<md5[:2]>/<md5>/<file>` (key prefix
   `SOURCES/cache` as bits writes it): the MD5 of the URL as the recipe spells it, the
   file its last segment. A read with `?url=<that URL>` and a token that may GET the
-  path fetches a missing archive: one fetch per name, streamed into staging (its
-  SHA-256 and the URL kept in the metadata) and promoted; meanwhile `202` with
-  `Retry-After`, then `302`. A failure answers `502` (`fetch-failed`, with a reason)
-  and is remembered for 10 minutes. Only http(s) from public addresses, checked on
-  each connection, redirects included; no proxy. Not the host's own addresses, nor
-  the CIDRs of the top-level `fetch_deny`: a site's own ranges (its internal
-  services may have public addresses; a NAT or floating address of the host too). The binding's `max_size` bounds a fetch
-  (bytes, default 32 GiB). Clients percent-encode the URL in the query (a raw `+`
-  would read as a space). 16 fetches at once, 4 per token subject; each buffers one
-  part (16 MiB at the default `max_size`).
+  path fetches a missing archive: one fetch per name, streamed into staging and
+  promoted, its SHA-256, URL and asker (`fetched-by`) in the metadata; meanwhile `202`
+  with `Retry-After`, then `302`. A failure answers `502` (`fetch-failed`, with a
+  reason), remembered for 10 minutes or until a reload. Clients percent-encode the
+  URL (a raw `+` reads as a space). The binding's `max_size` bounds a fetch (bytes,
+  default 32 GiB).
+- A `public` sources binding reads without a token, by plain URLs (make its key prefix
+  public-read; the volume needs keys, to write): a miss is the bucket's `404`, and bits
+  then downloads from the URL itself. Only a token with GET on the path fetches; any
+  other token reads as anyone does, a bad one gets `401`. What a fetch brings is then
+  public, from `site_hosts` too.
+- Where a fetch may go (`fetch` in the configuration): http(s) only, no proxy; never
+  loopback, link-local or the host's own addresses; the site network (private
+  addresses and `site_ranges`) only for the hosts in `site_hosts`; anywhere public
+  otherwise. bits-store resolves each host itself and checks every address it
+  connects to, redirects included. Domains outside `trusted` have a daily budget per
+  token subject and per domain (`untrusted_per_subject`, `untrusted_per_domain`,
+  default 100 fetches); a spent one answers `429` until midnight UTC. 16 fetches at
+  once, 4 per subject; each buffers one part (16 MiB at the default `max_size`).
+  Every fetch is logged with its asker, bytes and time.
+- `access_log`: `errors` (the default) logs errors and writes, not hits; `all` every
+  request; `none` no request lines. Fetches and failures are logged in any case.
 - Writes go through staging; a client never gets a URL for a final key:
   `POST <path>?uploads` with `{"size", "md5" (base64), "sha256" (hex)}` returns a
   presigned `PUT` into `STAGING/<id>` and the headers to send; after the upload,

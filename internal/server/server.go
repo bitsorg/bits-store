@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -38,7 +37,10 @@ type Server struct {
 	cache       tokenCache
 	uploads     *uploadTable
 	fetches     *fetchTable
+	policy      *fetchPolicy
 	fetchClient *http.Client
+	plain       map[string]objectStore // volume -> plain URLs, for public bindings
+	accessLog   string
 }
 
 // New builds a Server from a checked configuration.
@@ -51,13 +53,16 @@ func New(c *Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	var deny []netip.Prefix
-	for _, d := range c.FetchDeny {
-		p, err := netip.ParsePrefix(d)
-		if err != nil || p.Addr().Is4In6() { // addresses are checked unmapped
-			return nil, fmt.Errorf("fetch_deny: %q is not a CIDR (IPv4 ranges as IPv4)", d)
-		}
-		deny = append(deny, p.Masked())
+	pol, err := newPolicy(c.Fetch)
+	if err != nil {
+		return nil, err
+	}
+	accessLog := c.AccessLog
+	if accessLog == "" {
+		accessLog = "errors"
+	}
+	if accessLog != "all" && accessLog != "errors" && accessLog != "none" {
+		return nil, fmt.Errorf("access_log: all, errors or none")
 	}
 	life, err := duration(c.URLLifetime, 5*time.Minute)
 	if err != nil || life < minURLExpiry || life > time.Hour {
@@ -65,16 +70,21 @@ func New(c *Config) (*Server, error) {
 	}
 	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
 		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{},
-		fetchClient: newFetchClient(deny)}
+		policy: pol, fetchClient: pol.client(), plain: map[string]objectStore{}, accessLog: accessLog}
 	for name, vol := range c.Volumes {
 		s.place[name] = normEndpoint(vol.Endpoint) + " " + vol.Bucket
+		s.plain[name] = plainStore{strings.TrimSuffix(vol.Endpoint, "/"), vol.Bucket}
 		if s.stores[name], err = vol.store(); err != nil {
 			return nil, fmt.Errorf("volume %q: %v", name, err)
 		}
 	}
 	for _, b := range bs {
-		// a public binding must never presign with the service's keys
-		if b.Public != s.stores[b.Volume].Anonymous() {
+		// public bindings read by plain URLs; a fetching one has keys, to write
+		anon := s.stores[b.Volume].Anonymous()
+		switch {
+		case b.mirror != nil && anon:
+			return nil, fmt.Errorf("binding %q: format %s fetches, so it needs a volume with keys", b.Prefix, b.Format)
+		case b.mirror == nil && b.Public != anon:
 			return nil, fmt.Errorf("binding %q: public bindings need an anonymous volume, private ones a volume with keys", b.Prefix)
 		}
 	}
@@ -83,8 +93,11 @@ func New(c *Config) (*Server, error) {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	code, t, p := s.serve(w, r)
-	if p == "/health" && code == http.StatusOK {
+	switch {
+	case p == "/health" && code == http.StatusOK, s.accessLog == "none":
 		return
+	case s.accessLog == "errors" && code < 400 && r.Method != http.MethodPost:
+		return // hits and waits; writes and errors are logged
 	}
 	who := "-"
 	if t != nil {
@@ -119,7 +132,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 	}
 	b, key := s.resolve(segs)
 	now := s.now()
-	if b == nil || !b.Public || write {
+	// a public fetching binding reads without a token; asking for a fetch takes one
+	fetchAsk := !write && b != nil && b.mirror != nil && rawQuery != "" && bearer(r) != ""
+	if b == nil || !b.Public || write || fetchAsk {
 		// the token comes before 404, so no one learns the bindings without one
 		tok := bearer(r)
 		if tok == "" {
@@ -136,8 +151,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		if write {
 			method = http.MethodPut
 		}
-		if !t.Allows(method, segs) {
+		if !t.Allows(method, segs) && !(fetchAsk && b.Public) {
 			return fail(w, http.StatusForbidden), t, p
+		}
+		if !t.Allows(method, segs) {
+			t = nil // a public read, without the fetch the token may not ask for
 		}
 	}
 	if key == "" {
@@ -149,7 +167,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		}
 		return s.write(w, r, rawQuery, b, key, t, now), t, p
 	}
-	if b.mirror != nil && rawQuery != "" {
+	if b.mirror != nil && rawQuery != "" && t != nil {
 		return s.fetchRead(w, r, rawQuery, b, key, t, now), t, p
 	}
 	return s.redirect(w, r, b, key, t, now), t, p
@@ -163,7 +181,11 @@ func (s *Server) redirect(w http.ResponseWriter, r *http.Request, b *Binding, ke
 			expiry = max(left, minURLExpiry) // a URL never outlives its token
 		}
 	}
-	loc, err := s.stores[b.Volume].Presign(r.Context(), r.Method, key, expiry, nil)
+	st := s.stores[b.Volume]
+	if b.Public {
+		st = s.plain[b.Volume] // never the service's keys
+	}
+	loc, err := st.Presign(r.Context(), r.Method, key, expiry, nil)
 	if err != nil {
 		log.Printf("presign %s: %v", key, err)
 		return fail(w, http.StatusBadGateway)
