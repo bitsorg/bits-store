@@ -88,6 +88,7 @@ func setup(t *testing.T) (s *Server, good string, now time.Time) {
 			{Prefix: "/store/lhcb/x86_64-el10-esc", Volume: "s3", KeyPrefix: "ESC", Format: "test-escape"},
 			{Prefix: "/test/none", Volume: "pub2", Public: true, Format: "test-none"},
 			{Prefix: "/test/none-private", Volume: "s3", KeyPrefix: "NONE", Format: "test-none"},
+			{Prefix: "/store/lhcb/x86_64-el10-src", Volume: "s3", KeyPrefix: "SRC", Format: "sources", MaxSize: 1000},
 		}}
 	if s, err = New(c); err != nil {
 		t.Fatal(err)
@@ -240,9 +241,19 @@ func TestConfigRefused(t *testing.T) {
 		"bad-bucket": func(c *Config) {
 			c.Volumes["v"] = VolumeConf{Endpoint: "https://s3.example.org", Bucket: "B_ad", Region: "r"}
 		},
-		"no-bindings":       func(c *Config) { c.Bindings = nil },
-		"unknown-format":    func(c *Config) { c.Bindings[0].Format = "nope" },
-		"max-lifetime-zero": func(c *Config) { c.MaxLifetime = "0s" },
+		"no-bindings":         func(c *Config) { c.Bindings = nil },
+		"unknown-format":      func(c *Config) { c.Bindings[0].Format = "nope" },
+		"max-lifetime-zero":   func(c *Config) { c.MaxLifetime = "0s" },
+		"public-mirror":       func(c *Config) { c.Bindings[0].Format = "sources" },
+		"max-size-not-mirror": func(c *Config) { c.Bindings[0].MaxSize = 1 },
+		"max-size-negative": func(c *Config) {
+			c.Volumes["k"] = VolumeConf{Endpoint: "https://s3.example.org", Bucket: "b2b", Region: "r", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}
+			c.Bindings = append(c.Bindings, Binding{Prefix: "/s", Volume: "k", KeyPrefix: "S", Format: "sources", MaxSize: -1})
+		},
+		"max-size-too-big": func(c *Config) {
+			c.Volumes["k"] = VolumeConf{Endpoint: "https://s3.example.org", Bucket: "b2b", Region: "r", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}
+			c.Bindings = append(c.Bindings, Binding{Prefix: "/s", Volume: "k", KeyPrefix: "S", Format: "sources", MaxSize: 1 << 50})
+		},
 		"public-over-staging": func(c *Config) {
 			c.Volumes["k"] = VolumeConf{Endpoint: "https://s3.example.org", Bucket: "bucket", Region: "r", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}
 			c.Bindings[0].KeyPrefix = "STAGING"

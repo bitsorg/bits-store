@@ -19,6 +19,19 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
 - A binding's `format` (`internal/format`) names the objects under its prefix;
   `blob`, the default, uses the path as the key. Formats are compiled in and
   register themselves; each has conformance cases in `format_test.go`.
+- `sources` is bits' source cache, `<md5[:2]>/<md5>/<file>` (key prefix
+  `SOURCES/cache` as bits writes it): the MD5 of the URL as the recipe spells it, the
+  file its last segment. A read with `?url=<that URL>` and a token that may GET the
+  path fetches a missing archive: one fetch per name, streamed into staging (its
+  SHA-256 and the URL kept in the metadata) and promoted; meanwhile `202` with
+  `Retry-After`, then `302`. A failure answers `502` (`fetch-failed`, with a reason)
+  and is remembered for 10 minutes. Only http(s) from public addresses, checked on
+  each connection, redirects included; no proxy. Not the host's own addresses, nor
+  the CIDRs of the top-level `fetch_deny`: a site's own ranges (its internal
+  services may have public addresses; a NAT or floating address of the host too). The binding's `max_size` bounds a fetch
+  (bytes, default 32 GiB). Clients percent-encode the URL in the query (a raw `+`
+  would read as a space). 16 fetches at once, 4 per token subject; each buffers one
+  part (16 MiB at the default `max_size`).
 - Writes go through staging; a client never gets a URL for a final key:
   `POST <path>?uploads` with `{"size", "md5" (base64), "sha256" (hex)}` returns a
   presigned `PUT` into `STAGING/<id>` and the headers to send; after the upload,

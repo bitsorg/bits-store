@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,6 +28,7 @@ type memStore struct {
 	noIfMatch  bool          // the backend ignores x-amz-copy-source-if-match
 	copyFails  bool          // the copy errors and writes nothing (it may still land later)
 	statFails  string        // Stat of this key fails once
+	putParted  bool          // Put writes in parts whatever the size
 	mu         sync.Mutex
 	objs       map[string][]byte
 	meta       map[string]map[string]string
@@ -51,12 +53,16 @@ func (m *memStore) Stat(ctx context.Context, key string) (objInfo, bool, error) 
 		return objInfo{}, false, fmt.Errorf("stat failed")
 	}
 	b, ok := m.objs[key]
-	sum := md5.Sum(b)
-	etag := hex.EncodeToString(sum[:])
+	return objInfo{int64(len(b)), m.etag(key), m.meta[key]}, ok, nil
+}
+
+// etag is a key's ETag, its MD5 unless written in parts; m.mu held.
+func (m *memStore) etag(key string) string {
+	sum := md5.Sum(m.objs[key])
 	if m.parted[key] {
-		etag = fmt.Sprintf("%x-2", md5.Sum(sum[:]))
+		return fmt.Sprintf("%x-2", md5.Sum(sum[:]))
 	}
-	return objInfo{int64(len(b)), etag, m.meta[key]}, ok, nil
+	return hex.EncodeToString(sum[:])
 }
 func (m *memStore) Copy(_ context.Context, src, srcETag, dst string, size int64, meta map[string]string) error {
 	time.Sleep(m.delay)
@@ -71,10 +77,29 @@ func (m *memStore) Copy(_ context.Context, src, srcETag, dst string, size int64,
 	if m.copyFails {
 		return fmt.Errorf("timeout")
 	}
-	if sum := md5.Sum(m.objs[src]); !m.noIfMatch && hex.EncodeToString(sum[:]) != srcETag {
+	if !m.noIfMatch && m.etag(src) != srcETag {
 		return fmt.Errorf("precondition failed") // x-amz-copy-source-if-match
 	}
 	m.objs[dst], m.meta[dst], m.parted[dst] = m.objs[src], meta, size > maxCopy
+	return nil
+}
+func (m *memStore) Put(ctx context.Context, key string, r io.Reader, partSize int64, meta map[string]string) error {
+	// as minio-go reads a stream of unknown length: io.ErrUnexpectedEOF ends it
+	var b []byte
+	buf := make([]byte, 4096)
+	for {
+		n, err := r.Read(buf)
+		b = append(b, buf[:n]...)
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.objs[key], m.meta[key], m.parted[key] = b, meta, m.putParted || int64(len(b)) > partSize
 	return nil
 }
 func (m *memStore) Remove(_ context.Context, key string) error {
@@ -438,5 +463,22 @@ func TestFinishedUploadsDoNotFillTheTable(t *testing.T) {
 		if w := post(s, p+"?complete="+st.ID, tok, ""); w.Code != 201 {
 			t.Fatalf("%d: %d", i, w.Code)
 		}
+	}
+}
+
+// A client's staged bytes are judged by their MD5, never by a marker it may set.
+func TestAClientsMarkerIsNotTrusted(t *testing.T) {
+	s, tok, _ := setup(t)
+	m := newMem()
+	s.stores["s3"] = m
+	data := []byte("package tarball")
+	st := start(t, s, final, tok, data)
+	wrong := []byte("other tarball!!")
+	m.upload("STAGING/"+st.ID, wrong)
+	m.mu.Lock()
+	m.meta["STAGING/"+st.ID] = map[string]string{"bits-upload": st.ID}
+	m.mu.Unlock()
+	if w := post(s, final+"?complete="+st.ID, tok, ""); w.Code != 422 || m.has(finalKey) {
+		t.Fatalf("complete: %d, promoted %v", w.Code, m.has(finalKey))
 	}
 }

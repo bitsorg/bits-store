@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -39,6 +40,8 @@ type objectStore interface {
 	// has srcETag, replacing metadata and tags. Callers check dst afterwards: some
 	// backends report a failed copy with 200.
 	Copy(ctx context.Context, src, srcETag, dst string, size int64, meta map[string]string) error
+	// Put streams r to key, in parts of partSize when longer; meta as Copy's.
+	Put(ctx context.Context, key string, r io.Reader, partSize int64, meta map[string]string) error
 	Remove(ctx context.Context, key string) error
 	Anonymous() bool
 }
@@ -110,6 +113,12 @@ func (m minioStore) Copy(ctx context.Context, src, srcETag, dst string, size int
 	return err
 }
 
+func (m minioStore) Put(ctx context.Context, key string, r io.Reader, partSize int64, meta map[string]string) error {
+	_, err := m.c.PutObject(ctx, m.bucket, key, r, -1,
+		minio.PutObjectOptions{UserMetadata: meta, PartSize: uint64(partSize)})
+	return err
+}
+
 func (m minioStore) Remove(ctx context.Context, key string) error {
 	return m.c.RemoveObject(ctx, m.bucket, key, minio.RemoveObjectOptions{})
 }
@@ -136,6 +145,9 @@ func (plainStore) Stat(context.Context, string) (objInfo, bool, error) {
 	return objInfo{}, false, errAnonymous
 }
 func (plainStore) Copy(context.Context, string, string, string, int64, map[string]string) error {
+	return errAnonymous
+}
+func (plainStore) Put(context.Context, string, io.Reader, int64, map[string]string) error {
 	return errAnonymous
 }
 func (plainStore) Remove(context.Context, string) error { return errAnonymous }

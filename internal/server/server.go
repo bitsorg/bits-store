@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package server answers store requests: it checks the path and token
-// (docs/TOKEN.md), redirects GET and HEAD to presigned URLs, and takes writes
-// through staging (upload.go).
+// (docs/TOKEN.md), redirects GET and HEAD to presigned URLs, takes writes
+// through staging (upload.go) and fetches missing sources (fetch.go).
 package server
 
 import (
@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strings"
 	"sync"
@@ -24,18 +25,20 @@ const (
 	minURLExpiry = time.Second
 )
 
-// Server is safe for concurrent requests: the token cache and the upload table
-// have their own locks; the rest is read-only after New. A reload builds a new
-// Server sharing the upload table (Reloader).
+// Server is safe for concurrent requests: the token cache and the upload and
+// fetch tables have their own locks; the rest is read-only after New. A reload
+// builds a new Server sharing those tables (Reloader).
 type Server struct {
-	verifier *token.Verifier
-	bindings []Binding
-	stores   map[string]objectStore
-	place    map[string]string // volume -> its endpoint and bucket, for upload leases
-	urlLife  time.Duration
-	now      func() time.Time
-	cache    tokenCache
-	uploads  *uploadTable
+	verifier    *token.Verifier
+	bindings    []Binding
+	stores      map[string]objectStore
+	place       map[string]string // volume -> its endpoint and bucket, for upload leases
+	urlLife     time.Duration
+	now         func() time.Time
+	cache       tokenCache
+	uploads     *uploadTable
+	fetches     *fetchTable
+	fetchClient *http.Client
 }
 
 // New builds a Server from a checked configuration.
@@ -48,12 +51,21 @@ func New(c *Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	var deny []netip.Prefix
+	for _, d := range c.FetchDeny {
+		p, err := netip.ParsePrefix(d)
+		if err != nil || p.Addr().Is4In6() { // addresses are checked unmapped
+			return nil, fmt.Errorf("fetch_deny: %q is not a CIDR (IPv4 ranges as IPv4)", d)
+		}
+		deny = append(deny, p.Masked())
+	}
 	life, err := duration(c.URLLifetime, 5*time.Minute)
 	if err != nil || life < minURLExpiry || life > time.Hour {
 		return nil, fmt.Errorf("url_lifetime: between 1s and 1h")
 	}
 	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
-		urlLife: life, now: time.Now, uploads: &uploadTable{}}
+		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{},
+		fetchClient: newFetchClient(deny)}
 	for name, vol := range c.Volumes {
 		s.place[name] = normEndpoint(vol.Endpoint) + " " + vol.Bucket
 		if s.stores[name], err = vol.store(); err != nil {
@@ -137,6 +149,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		}
 		return s.write(w, r, rawQuery, b, key, t, now), t, p
 	}
+	if b.mirror != nil && rawQuery != "" {
+		return s.fetchRead(w, r, rawQuery, b, key, t, now), t, p
+	}
+	return s.redirect(w, r, b, key, t, now), t, p
+}
+
+// redirect answers a read with a presigned URL for key.
+func (s *Server) redirect(w http.ResponseWriter, r *http.Request, b *Binding, key string, t *token.Token, now time.Time) int {
 	expiry := s.urlLife
 	if t != nil {
 		if left := time.Unix(t.Exp, 0).Sub(now); left < expiry {
@@ -146,12 +166,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 	loc, err := s.stores[b.Volume].Presign(r.Context(), r.Method, key, expiry, nil)
 	if err != nil {
 		log.Printf("presign %s: %v", key, err)
-		return fail(w, http.StatusBadGateway), t, p
+		return fail(w, http.StatusBadGateway)
 	}
 	w.Header().Set("Location", loc)
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusFound)
-	return http.StatusFound, t, p
+	return http.StatusFound
 }
 
 // resolve finds the binding with the longest prefix and the object key under

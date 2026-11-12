@@ -25,6 +25,12 @@ type Format interface {
 	Route(rest []string) (Item, error)
 }
 
+// Mirror is a format whose missing objects the store fetches from a URL the
+// client names; Origin says whether that URL may be the item's origin.
+type Mirror interface {
+	Origin(it Item, url string) error
+}
+
 var (
 	mu       sync.Mutex
 	registry = map[string]Format{}

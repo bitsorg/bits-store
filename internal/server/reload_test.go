@@ -65,8 +65,8 @@ func TestReloadTakesAGoodConfigAndKeepsTheRunningOneOverABadOne(t *testing.T) {
 	if ok, err := r.Check(); !ok || err != nil || get() != 302 {
 		t.Fatalf("new binding: reloaded %v, %v; GET %d, want 302", ok, err, get())
 	}
-	if r.cur.Load().uploads != s.uploads {
-		t.Fatal("pending uploads did not carry over")
+	if r.cur.Load().uploads != s.uploads || r.cur.Load().fetches != s.fetches {
+		t.Fatal("pending uploads or fetches did not carry over")
 	}
 	c.Bindings = append(c.Bindings, Binding{Prefix: "/store/atlas", Volume: "nowhere"})
 	writeConfig(t, path, c)

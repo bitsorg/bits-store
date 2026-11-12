@@ -6,8 +6,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -148,5 +151,70 @@ func TestS3(t *testing.T) {
 	defer st.Remove(ctx, key+"3-copy")
 	if st.Copy(ctx, key+"3", "00000000000000000000000000000000", key+"3-copy", fi.Size, nil) == nil {
 		t.Error("a copy in parts ignored its source ETag condition")
+	}
+}
+
+// TestS3Fetch fetches sources into a real S3 endpoint (as TestS3) from a local
+// origin: a small one, then 40 MiB streamed in parts and promoted in parts.
+// It writes SRC/ and STAGING/ in that bucket.
+func TestS3Fetch(t *testing.T) {
+	ep, bucket := os.Getenv("BITS_STORE_S3IT_ENDPOINT"), os.Getenv("BITS_STORE_S3IT_BUCKET")
+	if ep == "" || bucket == "" {
+		t.Skip("BITS_STORE_S3IT_ENDPOINT and BITS_STORE_S3IT_BUCKET not set")
+	}
+	anyAddr(t)
+	s, tok, _ := setup(t)
+	vol := VolumeConf{Endpoint: ep, Bucket: bucket, Region: "us-east-1", AllowHTTP: strings.HasPrefix(ep, "http:"),
+		AccessKeyEnv: "BITS_STORE_S3IT_ACCESS_KEY", SecretKeyEnv: "BITS_STORE_S3IT_SECRET_KEY"}
+	st, err := vol.store()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.stores["s3"] = st
+	for i := range s.bindings {
+		if s.bindings[i].mirror != nil {
+			s.bindings[i].MaxSize = 64 << 20
+		}
+	}
+	oldMax, oldPart := maxCopy, copyPart
+	maxCopy, copyPart = 6<<20, 6<<20
+	defer func() { maxCopy, copyPart = oldMax, oldPart }()
+	ctx := context.Background()
+	staged := func() int {
+		n := 0
+		for range st.(minioStore).c.ListObjects(ctx, bucket, minio.ListObjectsOptions{Prefix: "STAGING/", Recursive: true}) {
+			n++
+		}
+		return n
+	}
+	before := staged()
+	for _, data := range [][]byte{[]byte("small source"), bytes.Repeat([]byte("forty mib "), 4<<20)} {
+		o := newOrigin(t, data)
+		src := fmt.Sprintf("%s/dl/s3it-%d.tar.gz", o.URL, len(data))
+		path, key := srcPath(src)
+		defer st.Remove(ctx, key)
+		w := ask(s, path, src, tok)
+		for i := 0; w.Code == 202 && i < 60; i++ {
+			w = ask(s, path, src, tok)
+		}
+		if w.Code != 302 {
+			t.Fatalf("%d bytes: %d %s", len(data), w.Code, w.Body)
+		}
+		resp, err := http.Get(w.Header().Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		sum := sha256.Sum256(data)
+		fi, _, err := st.Stat(ctx, key)
+		if !bytes.Equal(got, data) || err != nil || fi.Meta["sha256"] != hex.EncodeToString(sum[:]) || fi.Meta["source-url"] != src {
+			t.Fatalf("%d bytes: read %d, %+v %v", len(data), len(got), fi, err)
+		}
+		t.Logf("%d bytes: ETag %s", len(data), fi.ETag)
+	}
+	settled(t, s)
+	if n := staged(); n != before {
+		t.Errorf("staging objects: %d before, %d after", before, n)
 	}
 }

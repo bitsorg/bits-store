@@ -29,6 +29,7 @@ type Config struct {
 	Keys        map[string]KeyConfig  `json:"keys"`
 	Volumes     map[string]VolumeConf `json:"volumes"`
 	Bindings    []Binding             `json:"bindings"`
+	FetchDeny   []string              `json:"fetch_deny"` // CIDRs a fetch must not reach, e.g. a site's own
 }
 
 // KeyConfig is a token signing key: raw Ed25519 public key, base64url.
@@ -56,9 +57,13 @@ type Binding struct {
 	KeyPrefix string `json:"key_prefix"` // "SOURCES/cache"; empty: bucket root
 	Format    string `json:"format"`     // empty: "blob", the path is the key
 	Public    bool   `json:"public"`
+	MaxSize   int64  `json:"max_size"` // bytes a fetch may bring (Mirror formats); 0: 32 GiB
 	segs      []string
 	format    format.Format
+	mirror    format.Mirror // the format, when it fetches what is missing
 }
+
+const defaultMaxSize = 32 << 30
 
 // LoadConfig reads and checks a configuration file.
 func LoadConfig(path string) (*Config, error) {
@@ -157,6 +162,17 @@ func (c *Config) bindings() ([]Binding, error) {
 		if b.format, ok = format.Lookup(b.Format); !ok {
 			return nil, fmt.Errorf("binding %q: no format %q (have %s)", b.Prefix, b.Format,
 				strings.Join(format.Names(), ", "))
+		}
+		b.mirror, _ = b.format.(format.Mirror)
+		switch {
+		case b.mirror != nil && b.Public:
+			return nil, fmt.Errorf("binding %q: format %s fetches, so the binding must be private", b.Prefix, b.Format)
+		case b.mirror == nil && b.MaxSize != 0:
+			return nil, fmt.Errorf("binding %q: max_size is for formats that fetch", b.Prefix)
+		case b.MaxSize < 0 || b.MaxSize > maxFetch:
+			return nil, fmt.Errorf("binding %q: max_size up to %d", b.Prefix, int64(maxFetch))
+		case b.mirror != nil && b.MaxSize == 0:
+			b.MaxSize = defaultMaxSize
 		}
 		byBucket[where(vol)] = append(byBucket[where(vol)], b.KeyPrefix)
 		seen[b.Prefix] = true
