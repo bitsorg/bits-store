@@ -28,6 +28,13 @@ type objInfo struct {
 	Meta map[string]string
 }
 
+// partInfo is an uploaded part of a multipart upload; ETag without quotes.
+type partInfo struct {
+	N    int
+	Size int64
+	ETag string
+}
+
 // objectStore is what the server needs from a volume. Keys are object keys in
 // the volume's bucket.
 type objectStore interface {
@@ -40,6 +47,12 @@ type objectStore interface {
 	// has srcETag, replacing metadata and tags. Callers check dst afterwards: some
 	// backends report a failed copy with 200.
 	Copy(ctx context.Context, src, srcETag, dst string, size int64, meta map[string]string) error
+	// A multipart upload to key, whose parts a client puts by presigned URLs.
+	StartMultipart(ctx context.Context, key string) (uploadID string, err error)
+	PresignPart(ctx context.Context, key, uploadID string, n int, expiry time.Duration, hdr http.Header) (string, error)
+	ListParts(ctx context.Context, key, uploadID string) ([]partInfo, error)
+	CompleteMultipart(ctx context.Context, key, uploadID string, parts []partInfo) error
+	AbortMultipart(ctx context.Context, key, uploadID string) error
 	// Put streams r to key, in parts of partSize when longer; meta as Copy's.
 	Put(ctx context.Context, key string, r io.Reader, partSize int64, meta map[string]string) error
 	Remove(ctx context.Context, key string) error
@@ -119,6 +132,49 @@ func (m minioStore) Put(ctx context.Context, key string, r io.Reader, partSize i
 	return err
 }
 
+func (m minioStore) StartMultipart(ctx context.Context, key string) (string, error) {
+	return minio.Core{Client: m.c}.NewMultipartUpload(ctx, m.bucket, key, minio.PutObjectOptions{})
+}
+
+func (m minioStore) PresignPart(ctx context.Context, key, uploadID string, n int, expiry time.Duration, hdr http.Header) (string, error) {
+	q := url.Values{"partNumber": {fmt.Sprint(n)}, "uploadId": {uploadID}}
+	u, err := m.c.PresignHeader(ctx, http.MethodPut, m.bucket, key, expiry, q, hdr)
+	if err != nil {
+		return "", err
+	}
+	return u.String(), nil
+}
+
+func (m minioStore) ListParts(ctx context.Context, key, uploadID string) ([]partInfo, error) {
+	var out []partInfo
+	for marker := 0; ; {
+		r, err := minio.Core{Client: m.c}.ListObjectParts(ctx, m.bucket, key, uploadID, marker, 1000)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range r.ObjectParts {
+			out = append(out, partInfo{p.PartNumber, p.Size, strings.Trim(p.ETag, `"`)})
+		}
+		if !r.IsTruncated || r.NextPartNumberMarker <= marker {
+			return out, nil // a short list is a part missing: 409, never a loop
+		}
+		marker = r.NextPartNumberMarker
+	}
+}
+
+func (m minioStore) CompleteMultipart(ctx context.Context, key, uploadID string, parts []partInfo) error {
+	cp := make([]minio.CompletePart, len(parts))
+	for i, p := range parts {
+		cp[i] = minio.CompletePart{PartNumber: p.N, ETag: p.ETag}
+	}
+	_, err := minio.Core{Client: m.c}.CompleteMultipartUpload(ctx, m.bucket, key, uploadID, cp, minio.PutObjectOptions{})
+	return err
+}
+
+func (m minioStore) AbortMultipart(ctx context.Context, key, uploadID string) error {
+	return minio.Core{Client: m.c}.AbortMultipartUpload(ctx, m.bucket, key, uploadID)
+}
+
 func (m minioStore) Remove(ctx context.Context, key string) error {
 	return m.c.RemoveObject(ctx, m.bucket, key, minio.RemoveObjectOptions{})
 }
@@ -147,6 +203,17 @@ func (plainStore) Stat(context.Context, string) (objInfo, bool, error) {
 func (plainStore) Copy(context.Context, string, string, string, int64, map[string]string) error {
 	return errAnonymous
 }
+func (plainStore) StartMultipart(context.Context, string) (string, error) { return "", errAnonymous }
+func (plainStore) PresignPart(context.Context, string, string, int, time.Duration, http.Header) (string, error) {
+	return "", errAnonymous
+}
+func (plainStore) ListParts(context.Context, string, string) ([]partInfo, error) {
+	return nil, errAnonymous
+}
+func (plainStore) CompleteMultipart(context.Context, string, string, []partInfo) error {
+	return errAnonymous
+}
+func (plainStore) AbortMultipart(context.Context, string, string) error { return errAnonymous }
 func (plainStore) Put(context.Context, string, io.Reader, int64, map[string]string) error {
 	return errAnonymous
 }

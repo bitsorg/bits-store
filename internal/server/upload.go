@@ -23,6 +23,7 @@ import (
 //
 //	POST <path>?uploads          {"size", "md5" (base64), "sha256" (hex)}
 //	                             -> 201 {"id", "url", "method", "headers", "expires", "complete_by"}
+//	                             (in parts, multipart.go: "part_size", "part_md5" -> "parts")
 //	PUT  <url> with the headers  (straight to the volume, into STAGING/<id>)
 //	POST <path>?complete=<id>    -> 201 promoted (also on a retry), 409 the name exists
 //	                                or is being promoted, 422 wrong size or MD5
@@ -31,7 +32,7 @@ import (
 // "declared-sha256". First-writer-wins needs one instance: the lease is in memory.
 const (
 	stagingPrefix = "STAGING"
-	maxUpload     = 5 << 30 // one presigned PUT; multipart comes later
+	maxUpload     = 5 << 30 // one presigned PUT; more in parts
 	maxPending    = 10000
 	maxPerSubject = 100
 	completeGrace = time.Hour // after the URL expires, time left to complete
@@ -40,6 +41,9 @@ const (
 )
 
 var stepTimeout = time.Minute // a promote's other calls (Stat, Remove), each phase
+
+// completeTime is how long a complete may take: assembly, copy and their checks.
+func completeTime(size int64) time.Duration { return 2*copyTime(size) + 5*time.Minute }
 
 // copyTime is how long a promote's server-side copy of size bytes may take.
 func copyTime(size int64) time.Duration {
@@ -51,9 +55,12 @@ var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 type upload struct {
 	volume, key, staging, sub string
 	size                      int64
-	md5Hex, md5B64, sha256    string
+	md5Hex, sha256            string
 	meta                      map[string]string // the final object's, with bits-upload
 	fetched                   bool              // staged by the server (fetch.go), not a client
+	uploadID                  string            // a multipart upload's (multipart.go)
+	partSize                  int64
+	partMD5                   []string // hex
 	expires                   time.Time
 	done                      bool // promoted; kept so that a retried complete gets 201
 }
@@ -89,18 +96,32 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request, rawQuery string, 
 
 func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding, key string, t *token.Token, now time.Time) int {
 	var req struct {
-		Size   int64  `json:"size"`
-		MD5    string `json:"md5"`
-		SHA256 string `json:"sha256"`
+		Size     int64    `json:"size"`
+		MD5      string   `json:"md5"`
+		SHA256   string   `json:"sha256"`
+		PartSize int64    `json:"part_size"`
+		PartMD5  []string `json:"part_md5"`
 	}
-	dec := json.NewDecoder(io.LimitReader(r.Body, 4096))
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&req) != nil || req.Size <= 0 || req.Size > maxUpload || !sha256Hex.MatchString(req.SHA256) {
+	if dec.Decode(&req) != nil || req.Size <= 0 || !sha256Hex.MatchString(req.SHA256) {
 		return failMsg(w, http.StatusBadRequest, "bad-request")
 	}
-	md5, err := base64.StdEncoding.DecodeString(req.MD5)
-	if err != nil || len(md5) != 16 {
-		return failMsg(w, http.StatusBadRequest, "bad-request")
+	u := &upload{volume: b.Volume, key: key, sub: t.Sub, size: req.Size, sha256: req.SHA256,
+		meta: map[string]string{"declared-sha256": req.SHA256}}
+	if req.PartMD5 != nil {
+		var ok bool
+		u.partMD5, u.md5Hex, ok = checkParts(req.Size, req.PartSize, req.PartMD5)
+		if !ok || req.MD5 != "" {
+			return failMsg(w, http.StatusBadRequest, "bad-request")
+		}
+		u.partSize = req.PartSize
+	} else {
+		md5, err := base64.StdEncoding.DecodeString(req.MD5)
+		if err != nil || len(md5) != 16 || req.Size > maxUpload || req.PartSize != 0 {
+			return failMsg(w, http.StatusBadRequest, "bad-request")
+		}
+		u.md5Hex = hex.EncodeToString(md5)
 	}
 	left := time.Unix(t.Exp, 0).Sub(now)
 	if left < minTokenLeft {
@@ -116,33 +137,57 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 	idb := make([]byte, 16)
 	rand.Read(idb)
 	id := hex.EncodeToString(idb)
+	u.staging = stagingPrefix + "/" + id
 	expiry := min(s.urlLife, left)
-	u := &upload{volume: b.Volume, key: key, staging: stagingPrefix + "/" + id, sub: t.Sub, size: req.Size,
-		md5Hex: hex.EncodeToString(md5), md5B64: req.MD5, sha256: req.SHA256, expires: now.Add(expiry + completeGrace),
-		meta: map[string]string{"declared-sha256": req.SHA256}}
-	loc, err := st.Presign(r.Context(), http.MethodPut, u.staging, expiry, http.Header{"Content-Md5": {req.MD5}})
-	if err != nil {
-		log.Printf("presign %s: %v", u.staging, err)
-		return fail(w, http.StatusBadGateway)
+	if u.partMD5 != nil {
+		// parts start one after another: their URLs live a second per 8 MiB longer
+		expiry = min(s.urlLife+time.Duration(req.Size>>23)*time.Second, left)
+		http.NewResponseController(w).SetWriteDeadline(time.Now().Add(2 * time.Minute)) // up to 6 MB
 	}
+	u.expires = now.Add(expiry + completeGrace)
 	if !s.uploads.add(id, u, now, s.stores) {
 		return failMsg(w, http.StatusServiceUnavailable, "full")
 	}
+	answer := map[string]any{"id": id, "method": http.MethodPut}
+	if u.partMD5 != nil {
+		parts, err := s.presignParts(r.Context(), u, req.PartMD5, expiry)
+		if err != nil {
+			s.uploads.remove(id)
+			log.Printf("start parts %s: %v", u.staging, err)
+			return fail(w, http.StatusBadGateway)
+		}
+		answer["parts"] = parts
+	} else {
+		loc, err := st.Presign(r.Context(), http.MethodPut, u.staging, expiry, http.Header{"Content-Md5": {req.MD5}})
+		if err != nil {
+			s.uploads.remove(id)
+			log.Printf("presign %s: %v", u.staging, err)
+			return fail(w, http.StatusBadGateway)
+		}
+		answer["url"], answer["headers"] = loc, map[string]string{"Content-MD5": req.MD5}
+	}
+	answer["expires"] = now.Add(expiry).UTC().Format(time.RFC3339)
+	answer["complete_by"] = u.expires.UTC().Format(time.RFC3339)
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]any{"id": id, "url": loc, "method": http.MethodPut,
-		"headers": map[string]string{"Content-MD5": req.MD5}, "expires": now.Add(expiry).UTC().Format(time.RFC3339),
-		"complete_by": u.expires.UTC().Format(time.RFC3339)})
+	json.NewEncoder(w).Encode(answer)
 	return http.StatusCreated
 }
 
 func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, b *Binding, key, id string, t *token.Token, now time.Time) int {
-	u := s.uploads.get(id)
-	if u == nil || u.volume != b.Volume || u.key != key || u.sub != t.Sub || now.After(u.expires) {
+	u := s.uploads.claim(id, b.Volume, key, t.Sub, now)
+	if u == nil {
 		return fail(w, http.StatusNotFound)
 	}
-	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(copyTime(u.size) + 2*time.Minute))
+	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(completeTime(u.size)))
+	if u.uploadID != "" && !s.uploads.isDone(id) {
+		if code, msg := s.assemble(r.Context(), u, id); code != 0 && msg == "" {
+			return fail(w, code)
+		} else if code != 0 {
+			return failMsg(w, code, msg)
+		}
+	}
 	switch code, msg := s.promote(r.Context(), u, id, now); {
 	case code == http.StatusCreated:
 		return promoted(w, u)
@@ -185,12 +230,13 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 	// parts (no MD5 for ETag), is marked as ours by the upload id in its metadata.
 	marked := func(i objInfo) bool { return i.Size == u.size && i.Meta["bits-upload"] == id }
 	staged := func(i objInfo) bool { return i.Size == u.size && i.ETag == u.md5Hex || u.fetched && marked(i) }
-	ours := func(i objInfo) bool { return staged(i) || u.size > maxCopy && marked(i) }
+	// a copy of an object in parts may get a new ETag: ours by its marker too
+	ours := func(i objInfo) bool { return staged(i) || (u.size > maxCopy || u.uploadID != "") && marked(i) }
 	done := func() (int, string) {
+		s.uploads.markDone(id) // first: a retry must not look for the staged object
 		if err := st.Remove(ctx, u.staging); err != nil {
 			log.Printf("remove %s: %v", u.staging, err)
 		}
-		s.uploads.markDone(id)
 		return http.StatusCreated, ""
 	}
 	if fi, exists, err := st.Stat(ctx, u.key); err != nil {
@@ -271,11 +317,14 @@ func (ut *uploadTable) add(id string, u *upload, now time.Time, stores map[strin
 		if now.After(o.expires) {
 			delete(ut.m, oid)
 			if st := stores[o.volume]; !o.done && st != nil { // a reload may have removed the volume
-				go func(st objectStore, key string) {
+				go func(st objectStore, key, uploadID string) {
 					ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 					defer cancel()
+					if uploadID != "" {
+						st.AbortMultipart(ctx, key, uploadID)
+					}
 					st.Remove(ctx, key)
-				}(st, o.staging)
+				}(st, o.staging, o.uploadID)
 			}
 		} else if !o.done {
 			pending++
@@ -289,6 +338,21 @@ func (ut *uploadTable) add(id string, u *upload, now time.Time, stores map[strin
 	}
 	ut.m[id] = u
 	return true
+}
+
+// claim returns its owner's pending upload for a complete, kept at least until the
+// complete can no longer run; nil when there is none.
+func (ut *uploadTable) claim(id, volume, key, sub string, now time.Time) *upload {
+	ut.mu.Lock()
+	defer ut.mu.Unlock()
+	u := ut.m[id]
+	if u == nil || u.volume != volume || u.key != key || u.sub != sub || now.After(u.expires) {
+		return nil
+	}
+	if until := now.Add(completeTime(u.size)); u.expires.Before(until) {
+		u.expires = until
+	}
+	return u
 }
 
 func (ut *uploadTable) get(id string) *upload {

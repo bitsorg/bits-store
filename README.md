@@ -50,8 +50,16 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `POST <path>?complete=<id>` promotes it with a conditional server-side copy (201,
   also on a retry), or answers 409 if the name exists (first writer wins), 422 if size
   or MD5 differ. Size and MD5 are checked; the SHA-256 is kept as the uploader's
-  `declared-sha256`. Uploads up to 5 GiB for now (one presigned PUT); a promote above
-  5 GiB copies in parts, the upload's id in the object's metadata marking it as its own.
+  `declared-sha256`. One presigned PUT takes up to 5 GiB; a promote above 5 GiB copies
+  in parts, the upload's id in the object's metadata marking it as its own.
+- Uploads in parts (up to 1 TiB): `POST <path>?uploads` with `{"size", "sha256",
+  "part_size", "part_md5"}` (each part's MD5, base64; parts of 5 MiB to 5 GiB, the last
+  shorter, at most 10000) returns `"parts"`, a presigned `PUT` per part signing its
+  `Content-MD5`; their URLs live a second per 8 MiB longer than `url_lifetime` (not
+  beyond the token). `?complete=<id>` assembles the parts, `409 not-uploaded` while one
+  is missing or short (put it, complete again), `422 mismatch` when one differs (start
+  over), and promotes as above. A complete keeps its upload while it may run. Parts of about 1 GiB keep the answer small. Part ETags
+  must be MD5s: no SSE-KMS or SSE-C on the bucket.
   First-writer-wins needs a single instance (the lease is in memory) and bits-store as
   the bucket's only writer. Give the bucket lifecycle rules expiring `STAGING/` and
   aborting incomplete multipart uploads after a day.

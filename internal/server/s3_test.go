@@ -218,3 +218,70 @@ func TestS3Fetch(t *testing.T) {
 		t.Errorf("staging objects: %d before, %d after", before, n)
 	}
 }
+
+// TestS3Parts uploads in parts to a real S3 endpoint (as TestS3): 11 MiB in three
+// parts, promoted by a plain copy, then by a copy in parts.
+func TestS3Parts(t *testing.T) {
+	ep, bucket := os.Getenv("BITS_STORE_S3IT_ENDPOINT"), os.Getenv("BITS_STORE_S3IT_BUCKET")
+	if ep == "" || bucket == "" {
+		t.Skip("BITS_STORE_S3IT_ENDPOINT and BITS_STORE_S3IT_BUCKET not set")
+	}
+	s, tok, _ := setup(t)
+	vol := VolumeConf{Endpoint: ep, Bucket: bucket, Region: "us-east-1", AllowHTTP: strings.HasPrefix(ep, "http:"),
+		AccessKeyEnv: "BITS_STORE_S3IT_ACCESS_KEY", SecretKeyEnv: "BITS_STORE_S3IT_SECRET_KEY"}
+	st, err := vol.store()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.stores["s3"] = st
+	ctx := context.Background()
+	defer func(c, p int64) { maxCopy, copyPart = c, p }(maxCopy, copyPart)
+	data := bytes.Repeat([]byte("parts "), (11<<20)/6+5)
+	for i, mc := range []int64{maxCopy, 6 << 20} {
+		maxCopy, copyPart = mc, 6<<20
+		name, key := fmt.Sprintf("%s-parts%d", final, i), fmt.Sprintf("%s-parts%d", finalKey, i)
+		defer st.Remove(ctx, key)
+		up := startParts(t, s, name, tok, partsBody(data, 5<<20))
+		put := func(n int, b []byte) int {
+			p := up.Parts[n-1]
+			r, _ := http.NewRequest("PUT", p.URL, bytes.NewReader(b))
+			r.Header.Set("Content-MD5", p.Headers["Content-MD5"])
+			resp, err := http.DefaultClient.Do(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			return resp.StatusCode
+		}
+		t.Logf("backend refuses a part not matching its signed Content-MD5: %v", put(1, data[1:5<<20+1]) != 200)
+		for n := 1; n <= 2; n++ {
+			if c := put(n, data[(n-1)*(5<<20):n*(5<<20)]); c != 200 {
+				t.Fatalf("part %d: %d", n, c)
+			}
+		}
+		if w := post(s, name+"?complete="+up.ID, tok, ""); w.Code != 409 {
+			t.Fatalf("a part missing: %d %s", w.Code, w.Body)
+		}
+		if c := put(3, data[10<<20:]); c != 200 {
+			t.Fatalf("part 3: %d", c)
+		}
+		if w := post(s, name+"?complete="+up.ID, tok, ""); w.Code != 201 {
+			t.Fatalf("complete: %d %s", w.Code, w.Body)
+		}
+		w := do(s, "GET", name, map[string]string{"Authorization": "Bearer " + tok})
+		resp, err := http.Get(w.Header().Get("Location"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		fi, _, _ := st.Stat(ctx, key)
+		if !bytes.Equal(got, data) || fi.Meta["bits-upload"] != up.ID {
+			t.Fatalf("read back %d bytes, %+v", len(got), fi)
+		}
+		if _, ok, _ := st.Stat(ctx, "STAGING/"+up.ID); ok {
+			t.Error("staging object left behind")
+		}
+		t.Logf("maxCopy %d: final ETag %s", mc, fi.ETag)
+	}
+}

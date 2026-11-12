@@ -29,14 +29,81 @@ type memStore struct {
 	copyFails  bool          // the copy errors and writes nothing (it may still land later)
 	statFails  string        // Stat of this key fails once
 	putParted  bool          // Put writes in parts whatever the size
+	presignErr bool          // PresignPart fails
 	mu         sync.Mutex
 	objs       map[string][]byte
 	meta       map[string]map[string]string
-	parted     map[string]bool // copied in parts: its ETag is not its MD5
+	parted     map[string]bool           // copied in parts: its ETag is not its MD5
+	etags      map[string]string         // assembled from parts: S3's ETag
+	mp         map[string]map[int][]byte // multipart uploads' parts, by upload id
+	mpKey      map[string]string         // their keys
 }
 
 func newMem() *memStore {
-	return &memStore{objs: map[string][]byte{}, meta: map[string]map[string]string{}, parted: map[string]bool{}}
+	return &memStore{objs: map[string][]byte{}, meta: map[string]map[string]string{}, parted: map[string]bool{},
+		etags: map[string]string{}, mp: map[string]map[int][]byte{}, mpKey: map[string]string{}}
+}
+func (m *memStore) StartMultipart(_ context.Context, key string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := fmt.Sprintf("mp%d", len(m.mp)+1)
+	m.mp[id], m.mpKey[id] = map[int][]byte{}, key
+	return id, nil
+}
+func (m *memStore) PresignPart(_ context.Context, key, uploadID string, n int, _ time.Duration, hdr http.Header) (string, error) {
+	if m.presignErr {
+		return "", fmt.Errorf("presign failed")
+	}
+	return fmt.Sprintf("https://mem/%s?partNumber=%d&uploadId=%s&md5=%s", key, n, uploadID, hdr.Get("Content-MD5")), nil
+}
+func (m *memStore) ListParts(_ context.Context, key, uploadID string) ([]partInfo, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	parts, ok := m.mp[uploadID]
+	if !ok || m.mpKey[uploadID] != key {
+		return nil, fmt.Errorf("NoSuchUpload")
+	}
+	var out []partInfo
+	for n, b := range parts {
+		sum := md5.Sum(b)
+		out = append(out, partInfo{n, int64(len(b)), hex.EncodeToString(sum[:])})
+	}
+	return out, nil
+}
+func (m *memStore) CompleteMultipart(_ context.Context, key, uploadID string, parts []partInfo) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	have, ok := m.mp[uploadID]
+	if !ok || m.mpKey[uploadID] != key {
+		return fmt.Errorf("NoSuchUpload")
+	}
+	var b []byte
+	all := md5.New()
+	for _, p := range parts {
+		sum := md5.Sum(have[p.N])
+		if hex.EncodeToString(sum[:]) != p.ETag {
+			return fmt.Errorf("InvalidPart")
+		}
+		b = append(b, have[p.N]...)
+		all.Write(sum[:])
+	}
+	m.objs[key], m.meta[key], m.parted[key] = b, nil, true
+	m.etags[key] = fmt.Sprintf("%x-%d", all.Sum(nil), len(parts))
+	delete(m.mp, uploadID)
+	return nil
+}
+func (m *memStore) AbortMultipart(_ context.Context, key, uploadID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.mp, uploadID)
+	return nil
+}
+
+// uploadPart stands in for the client's PUT of a part.
+func (m *memStore) uploadPart(uploadID string, n int, b []byte) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.mp[uploadID][n] = b
 }
 func (m *memStore) Anonymous() bool { return false }
 func (m *memStore) Presign(_ context.Context, method, key string, _ time.Duration, hdr http.Header) (string, error) {
@@ -58,6 +125,9 @@ func (m *memStore) Stat(ctx context.Context, key string) (objInfo, bool, error) 
 
 // etag is a key's ETag, its MD5 unless written in parts; m.mu held.
 func (m *memStore) etag(key string) string {
+	if e, ok := m.etags[key]; ok {
+		return e
+	}
 	sum := md5.Sum(m.objs[key])
 	if m.parted[key] {
 		return fmt.Sprintf("%x-2", md5.Sum(sum[:]))
@@ -81,6 +151,7 @@ func (m *memStore) Copy(_ context.Context, src, srcETag, dst string, size int64,
 		return fmt.Errorf("precondition failed") // x-amz-copy-source-if-match
 	}
 	m.objs[dst], m.meta[dst], m.parted[dst] = m.objs[src], meta, size > maxCopy
+	delete(m.etags, dst) // a copy gets its own ETag, as MinIO's does
 	return nil
 }
 func (m *memStore) Put(ctx context.Context, key string, r io.Reader, partSize int64, meta map[string]string) error {
@@ -100,18 +171,21 @@ func (m *memStore) Put(ctx context.Context, key string, r io.Reader, partSize in
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.objs[key], m.meta[key], m.parted[key] = b, meta, m.putParted || int64(len(b)) > partSize
+	delete(m.etags, key)
 	return nil
 }
 func (m *memStore) Remove(_ context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.objs, key)
+	delete(m.etags, key)
 	return nil
 }
 func (m *memStore) upload(key string, b []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.objs[key] = b
+	delete(m.etags, key)
 }
 func (m *memStore) has(key string) bool { _, ok, _ := m.Stat(context.Background(), key); return ok }
 
