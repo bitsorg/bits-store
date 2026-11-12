@@ -36,8 +36,15 @@ const (
 	maxPerSubject = 100
 	completeGrace = time.Hour // after the URL expires, time left to complete
 	minTokenLeft  = time.Minute
-	copyTimeout   = 10 * time.Minute
+	copyTimeout   = 10 * time.Minute // and a second per 32 MiB beyond (copyTime)
 )
+
+var stepTimeout = time.Minute // a promote's other calls (Stat, Remove), each phase
+
+// copyTime is how long a promote's server-side copy of size bytes may take.
+func copyTime(size int64) time.Duration {
+	return copyTimeout + time.Duration(size>>25)*time.Second
+}
 
 var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -98,7 +105,7 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 		return failMsg(w, http.StatusUnauthorized, "token-expiring")
 	}
 	st := s.stores[b.Volume]
-	if _, _, exists, err := st.Stat(r.Context(), key); err != nil {
+	if _, exists, err := st.Stat(r.Context(), key); err != nil {
 		log.Printf("stat %s: %v", key, err)
 		return fail(w, http.StatusBadGateway)
 	} else if exists {
@@ -145,10 +152,10 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, b *Bindi
 	if s.uploads.isDone(id) {
 		return promoted(w, u)
 	}
-	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(copyTimeout + 2*time.Minute))
+	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(copyTime(u.size) + 2*time.Minute))
 	// The copy must not stop with the request: a copy landing after a 502 and a
 	// released lease could overwrite the next writer.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), time.Minute)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), stepTimeout)
 	defer cancel()
 	st := s.stores[u.volume]
 	drop := func(code int, msg string) int {
@@ -158,7 +165,11 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, b *Bindi
 		s.uploads.remove(id)
 		return failMsg(w, code, msg)
 	}
-	ours := func(size int64, etag string) bool { return size == u.size && etag == u.md5Hex }
+	staged := func(i objInfo) bool { return i.Size == u.size && i.ETag == u.md5Hex }
+	// A copy in parts has no MD5 for ETag: its upload id in the metadata says it is ours.
+	ours := func(i objInfo) bool {
+		return staged(i) || u.size > maxCopy && i.Size == u.size && i.Meta["bits-upload"] == id
+	}
 	done := func() int {
 		if err := st.Remove(ctx, u.staging); err != nil {
 			log.Printf("remove %s: %v", u.staging, err)
@@ -166,42 +177,47 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, b *Bindi
 		s.uploads.markDone(id)
 		return promoted(w, u)
 	}
-	if fsize, fetag, exists, err := st.Stat(ctx, u.key); err != nil {
+	if fi, exists, err := st.Stat(ctx, u.key); err != nil {
 		return fail(w, http.StatusBadGateway)
-	} else if exists && ours(fsize, fetag) {
+	} else if exists && ours(fi) {
 		return done() // an earlier complete landed, and its answer was lost
 	} else if exists {
 		return drop(http.StatusConflict, "exists") // first writer wins
 	}
-	size, etag, ok, err := st.Stat(ctx, u.staging)
+	si, ok, err := st.Stat(ctx, u.staging)
 	switch {
 	case err != nil:
 		return fail(w, http.StatusBadGateway)
 	case !ok:
 		return failMsg(w, http.StatusConflict, "not-uploaded")
-	case !ours(size, etag):
+	case !staged(si):
 		return drop(http.StatusUnprocessableEntity, "mismatch")
 	}
-	cctx, ccancel := context.WithTimeout(context.WithoutCancel(r.Context()), copyTimeout)
-	copyErr := st.Copy(cctx, u.staging, etag, u.key, map[string]string{"declared-sha256": u.sha256})
+	cctx, ccancel := context.WithTimeout(context.WithoutCancel(r.Context()), copyTime(u.size))
+	copyErr := st.Copy(cctx, u.staging, si.ETag, u.key, u.size,
+		map[string]string{"declared-sha256": u.sha256, "bits-upload": id})
 	ccancel()
+	// the copy may have outlasted ctx: a fresh one for what follows (drop, done too)
+	sctx, scancel := context.WithTimeout(context.WithoutCancel(r.Context()), stepTimeout)
+	defer scancel()
+	ctx = sctx
 	// Settle the outcome from the final object itself, whatever the copy said.
-	fsize, fetag, fok, err := st.Stat(ctx, u.key)
+	fi, fok, err := st.Stat(ctx, u.key)
 	switch {
 	case err != nil || !fok && copyErr != nil:
 		// the copy may still land: keep the name leased until it no longer can
 		log.Printf("promote %s: copy: %v; stat: %v", u.key, copyErr, err)
 		held = true
-		s.uploads.hold(place, u.key, now.Add(copyTimeout))
+		s.uploads.hold(place, u.key, now.Add(copyTime(u.size)))
 		return fail(w, http.StatusBadGateway) // staging kept: the client may retry later
 	case !fok:
 		log.Printf("promote %s: the copy reported success but wrote nothing", u.key)
 		return fail(w, http.StatusBadGateway)
-	case !ours(fsize, fetag):
+	case !ours(fi):
 		// Ours only if it equals the staged object now (a backend ignoring the copy
 		// condition took swapped bytes); anything else is not ours to delete.
-		ssize, setag, sok, _ := st.Stat(ctx, u.staging)
-		if sok && ssize == fsize && setag == fetag {
+		si, sok, _ := st.Stat(ctx, u.staging)
+		if sok && si.Size == fi.Size && si.ETag == fi.ETag {
 			if err := st.Remove(ctx, u.key); err != nil {
 				log.Printf("promote %s: swapped bytes copied and NOT removed: %v", u.key, err)
 				return fail(w, http.StatusBadGateway)

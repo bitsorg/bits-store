@@ -17,18 +17,28 @@ import (
 	"github.com/minio/minio-go/v7/pkg/s3utils"
 )
 
+// A copy above maxCopy goes in parts of copyPart (S3's CopyObject takes up to 5 GiB).
+var maxCopy, copyPart int64 = 5 << 30, 1 << 30
+
+// objInfo is what Stat tells of an object; Meta's keys are lower case, without x-amz-meta-.
+type objInfo struct {
+	Size int64
+	ETag string
+	Meta map[string]string
+}
+
 // objectStore is what the server needs from a volume. Keys are object keys in
 // the volume's bucket.
 type objectStore interface {
 	// Presign returns a URL for one request; hdr lists headers the URL signs,
 	// which the client must then send unchanged.
 	Presign(ctx context.Context, method, key string, expiry time.Duration, hdr http.Header) (string, error)
-	// Stat returns the object's size and ETag; ok is false when it does not exist.
-	Stat(ctx context.Context, key string) (size int64, etag string, ok bool, err error)
-	// Copy copies src to dst inside the bucket, only if src still has srcETag,
-	// replacing metadata and tags. Callers check dst afterwards: some backends
-	// report a failed copy with 200.
-	Copy(ctx context.Context, src, srcETag, dst string, meta map[string]string) error
+	// Stat returns what is known of the object; ok is false when it does not exist.
+	Stat(ctx context.Context, key string) (info objInfo, ok bool, err error)
+	// Copy copies src (of size bytes) to dst inside the bucket, only if src still
+	// has srcETag, replacing metadata and tags. Callers check dst afterwards: some
+	// backends report a failed copy with 200.
+	Copy(ctx context.Context, src, srcETag, dst string, size int64, meta map[string]string) error
 	Remove(ctx context.Context, key string) error
 	Anonymous() bool
 }
@@ -72,21 +82,31 @@ func (m minioStore) Presign(ctx context.Context, method, key string, expiry time
 	return u.String(), nil
 }
 
-func (m minioStore) Stat(ctx context.Context, key string) (int64, string, bool, error) {
+func (m minioStore) Stat(ctx context.Context, key string) (objInfo, bool, error) {
 	info, err := m.c.StatObject(ctx, m.bucket, key, minio.StatObjectOptions{})
 	if err != nil {
 		if minio.ToErrorResponse(err).StatusCode == http.StatusNotFound {
-			return 0, "", false, nil
+			return objInfo{}, false, nil
 		}
-		return 0, "", false, err
+		return objInfo{}, false, err
 	}
-	return info.Size, strings.Trim(info.ETag, `"`), true, nil
+	meta := map[string]string{}
+	for k, v := range info.UserMetadata {
+		meta[strings.ToLower(k)] = v
+	}
+	return objInfo{info.Size, strings.Trim(info.ETag, `"`), meta}, true, nil
 }
 
-func (m minioStore) Copy(ctx context.Context, src, srcETag, dst string, meta map[string]string) error {
-	_, err := m.c.CopyObject(ctx,
-		minio.CopyDestOptions{Bucket: m.bucket, Object: dst, ReplaceMetadata: true, UserMetadata: meta, ReplaceTags: true},
-		minio.CopySrcOptions{Bucket: m.bucket, Object: src, MatchETag: srcETag})
+func (m minioStore) Copy(ctx context.Context, src, srcETag, dst string, size int64, meta map[string]string) error {
+	d := minio.CopyDestOptions{Bucket: m.bucket, Object: dst, ReplaceMetadata: true, UserMetadata: meta,
+		ReplaceTags: true, PartSize: uint64(copyPart)}
+	s := minio.CopySrcOptions{Bucket: m.bucket, Object: src, MatchETag: srcETag} // each part's condition too
+	var err error
+	if size <= maxCopy {
+		_, err = m.c.CopyObject(ctx, d, s)
+	} else {
+		_, err = m.c.ComposeObject(ctx, d, s)
+	}
 	return err
 }
 
@@ -112,10 +132,10 @@ func (p plainStore) Presign(_ context.Context, method, key string, _ time.Durati
 	return p.endpoint + "/" + url.PathEscape(p.bucket) + "/" + strings.Join(segs, "/"), nil
 }
 
-func (plainStore) Stat(context.Context, string) (int64, string, bool, error) {
-	return 0, "", false, errAnonymous
+func (plainStore) Stat(context.Context, string) (objInfo, bool, error) {
+	return objInfo{}, false, errAnonymous
 }
-func (plainStore) Copy(context.Context, string, string, string, map[string]string) error {
+func (plainStore) Copy(context.Context, string, string, string, int64, map[string]string) error {
 	return errAnonymous
 }
 func (plainStore) Remove(context.Context, string) error { return errAnonymous }

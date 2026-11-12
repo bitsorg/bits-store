@@ -25,9 +25,11 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `POST <path>?complete=<id>` promotes it with a conditional server-side copy (201,
   also on a retry), or answers 409 if the name exists (first writer wins), 422 if size
   or MD5 differ. Size and MD5 are checked; the SHA-256 is kept as the uploader's
-  `declared-sha256`. Up to 5 GiB for now. First-writer-wins needs a single instance
-  (the lease is in memory) and bits-store as the bucket's only writer. Give the bucket
-  a lifecycle rule expiring `STAGING/` after a day.
+  `declared-sha256`. Uploads up to 5 GiB for now (one presigned PUT); a promote above
+  5 GiB copies in parts, the upload's id in the object's metadata marking it as its own.
+  First-writer-wins needs a single instance (the lease is in memory) and bits-store as
+  the bucket's only writer. Give the bucket lifecycle rules expiring `STAGING/` and
+  aborting incomplete multipart uploads after a day.
 - Container: `make image` builds `bits-store:<version>`, the static binary alone in an
   empty image, as user 65532, listening on 8098 (the default when the configuration
   sets no `listen`). Mount the configuration at `/etc/bits-store/config.json` and give

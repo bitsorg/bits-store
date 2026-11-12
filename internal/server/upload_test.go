@@ -30,27 +30,35 @@ type memStore struct {
 	mu         sync.Mutex
 	objs       map[string][]byte
 	meta       map[string]map[string]string
+	parted     map[string]bool // copied in parts: its ETag is not its MD5
 }
 
 func newMem() *memStore {
-	return &memStore{objs: map[string][]byte{}, meta: map[string]map[string]string{}}
+	return &memStore{objs: map[string][]byte{}, meta: map[string]map[string]string{}, parted: map[string]bool{}}
 }
 func (m *memStore) Anonymous() bool { return false }
 func (m *memStore) Presign(_ context.Context, method, key string, _ time.Duration, hdr http.Header) (string, error) {
 	return fmt.Sprintf("https://mem/%s?m=%s&md5=%s", key, method, hdr.Get("Content-MD5")), nil
 }
-func (m *memStore) Stat(_ context.Context, key string) (int64, string, bool, error) {
+func (m *memStore) Stat(ctx context.Context, key string) (objInfo, bool, error) {
+	if ctx.Err() != nil {
+		return objInfo{}, false, ctx.Err()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if key == m.statFails {
 		m.statFails = ""
-		return 0, "", false, fmt.Errorf("stat failed")
+		return objInfo{}, false, fmt.Errorf("stat failed")
 	}
 	b, ok := m.objs[key]
 	sum := md5.Sum(b)
-	return int64(len(b)), hex.EncodeToString(sum[:]), ok, nil
+	etag := hex.EncodeToString(sum[:])
+	if m.parted[key] {
+		etag = fmt.Sprintf("%x-2", md5.Sum(sum[:]))
+	}
+	return objInfo{int64(len(b)), etag, m.meta[key]}, ok, nil
 }
-func (m *memStore) Copy(_ context.Context, src, srcETag, dst string, meta map[string]string) error {
+func (m *memStore) Copy(_ context.Context, src, srcETag, dst string, size int64, meta map[string]string) error {
 	time.Sleep(m.delay)
 	if m.beforeCopy != nil {
 		m.beforeCopy()
@@ -66,7 +74,7 @@ func (m *memStore) Copy(_ context.Context, src, srcETag, dst string, meta map[st
 	if sum := md5.Sum(m.objs[src]); !m.noIfMatch && hex.EncodeToString(sum[:]) != srcETag {
 		return fmt.Errorf("precondition failed") // x-amz-copy-source-if-match
 	}
-	m.objs[dst], m.meta[dst] = m.objs[src], meta
+	m.objs[dst], m.meta[dst], m.parted[dst] = m.objs[src], meta, size > maxCopy
 	return nil
 }
 func (m *memStore) Remove(_ context.Context, key string) error {
@@ -80,7 +88,7 @@ func (m *memStore) upload(key string, b []byte) {
 	defer m.mu.Unlock()
 	m.objs[key] = b
 }
-func (m *memStore) has(key string) bool { _, _, ok, _ := m.Stat(context.Background(), key); return ok }
+func (m *memStore) has(key string) bool { _, ok, _ := m.Stat(context.Background(), key); return ok }
 
 type started struct {
 	ID, URL, Method string
@@ -139,6 +147,64 @@ func TestUploadPromotes(t *testing.T) {
 	}
 	if w := post(s, final+"?uploads", tok, body(data)); w.Code != 409 {
 		t.Fatalf("start over an existing object: %d", w.Code)
+	}
+}
+
+// Above maxCopy a promote copies in parts: the final ETag is no MD5, its upload id says it is ours.
+func TestALargeUploadIsPromotedInParts(t *testing.T) {
+	old := maxCopy
+	maxCopy = 8
+	defer func() { maxCopy = old }()
+	s, tok, _ := setup(t)
+	m := newMem()
+	s.stores["s3"] = m
+	data := []byte("a large package tarball")
+	st := start(t, s, final, tok, data)
+	m.upload("STAGING/"+st.ID, data)
+	if w := post(s, final+"?complete="+st.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("complete: %d %s", w.Code, w.Body)
+	}
+	if !m.parted[finalKey] || m.meta[finalKey]["bits-upload"] != st.ID {
+		t.Fatalf("not copied in parts with its upload id: %v %v", m.parted[finalKey], m.meta[finalKey])
+	}
+	if w := post(s, final+"?complete="+st.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("retried complete: %d", w.Code)
+	}
+	// a copy that outlasts the step timeout is settled with a fresh one
+	oldStep := stepTimeout
+	stepTimeout = 50 * time.Millisecond
+	defer func() { stepTimeout = oldStep }()
+	m.delay = 100 * time.Millisecond
+	st = start(t, s, final+"slow", tok, data)
+	m.upload("STAGING/"+st.ID, data)
+	if w := post(s, final+"slow?complete="+st.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("a slow copy: %d %s", w.Code, w.Body)
+	}
+	m.delay = 0
+	// an object of that size someone else copied in parts, there by the complete, is not ours
+	st = start(t, s, final+"2", tok, data)
+	m.upload("STAGING/"+st.ID, data)
+	m.objs[finalKey+"2"], m.parted[finalKey+"2"] = data, true
+	if w := post(s, final+"2?complete="+st.ID, tok, ""); w.Code != 409 {
+		t.Fatalf("another's object of the same size: %d %s", w.Code, w.Body)
+	}
+	for i, other := range []struct {
+		size int64             // maxCopy for the upload: above it, the id is asked
+		meta map[string]string // the object found at the name
+	}{{8, map[string]string{"bits-upload": "another-id"}}, {64, nil}} {
+		maxCopy = other.size
+		name := fmt.Sprintf("%s-o%d", final, i)
+		st = start(t, s, name, tok, data)
+		m.upload("STAGING/"+st.ID, data)
+		k := fmt.Sprintf("%s-o%d", finalKey, i)
+		meta := other.meta
+		if meta == nil { // our id, but not parted, and its ETag not our MD5
+			meta = map[string]string{"bits-upload": st.ID}
+		}
+		m.objs[k], m.parted[k], m.meta[k] = data, true, meta
+		if w := post(s, name+"?complete="+st.ID, tok, ""); w.Code != 409 {
+			t.Fatalf("case %d, not ours: %d %s", i, w.Code, w.Body)
+		}
 	}
 }
 

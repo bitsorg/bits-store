@@ -79,7 +79,7 @@ func TestS3(t *testing.T) {
 	if w := post(s, name+"?complete="+up.ID, tok, ""); w.Code != 201 {
 		t.Fatalf("complete: %d %s", w.Code, w.Body)
 	}
-	if _, _, ok, _ := st.Stat(ctx, "STAGING/"+up.ID); ok {
+	if _, ok, _ := st.Stat(ctx, "STAGING/"+up.ID); ok {
 		t.Errorf("staging object left behind")
 	}
 	// A replay can only re-create the staging object (an orphan for the bucket's
@@ -110,10 +110,43 @@ func TestS3(t *testing.T) {
 			t.Errorf("wrong bytes promoted: %d", w.Code)
 		}
 	}
-	err = st.Copy(ctx, key, "00000000000000000000000000000000", key+"-copy", nil)
+	err = st.Copy(ctx, key, "00000000000000000000000000000000", key+"-copy", int64(len(data)), nil)
 	t.Logf("backend refuses a copy whose source ETag does not match: %v", err != nil)
 	st.Remove(ctx, key+"-copy")
 	if w := post(s, name+"?uploads", tok, body(data)); w.Code != 409 {
 		t.Errorf("start over the existing object: %d", w.Code)
+	}
+
+	// a promote in parts: the thresholds lowered, 12 MiB in two parts (S3 takes parts of 5 MiB up)
+	oldMax, oldPart := maxCopy, copyPart
+	maxCopy, copyPart = 6<<20, 6<<20
+	defer func() { maxCopy, copyPart = oldMax, oldPart }()
+	big := bytes.Repeat([]byte("large "), 2<<20)
+	defer st.Remove(ctx, key+"3")
+	w = post(s, name+"3?uploads", tok, body(big))
+	json.Unmarshal(w.Body.Bytes(), &up)
+	if c := put(big, up.Headers["Content-MD5"]); c != 200 {
+		t.Fatalf("large upload: %d", c)
+	}
+	if w := post(s, name+"3?complete="+up.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("large complete: %d %s", w.Code, w.Body)
+	}
+	fi, _, err := st.Stat(ctx, key+"3")
+	if err != nil || fi.Size != int64(len(big)) || !strings.Contains(fi.ETag, "-") || fi.Meta["bits-upload"] != up.ID {
+		t.Fatalf("not copied in parts: %+v %v", fi, err)
+	}
+	w = do(s, "GET", name+"3", map[string]string{"Authorization": "Bearer " + tok})
+	resp, err = http.Get(w.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Equal(got, big) {
+		t.Fatalf("large read back: %d bytes", len(got))
+	}
+	defer st.Remove(ctx, key+"3-copy")
+	if st.Copy(ctx, key+"3", "00000000000000000000000000000000", key+"3-copy", fi.Size, nil) == nil {
+		t.Error("a copy in parts ignored its source ETag condition")
 	}
 }
