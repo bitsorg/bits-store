@@ -25,15 +25,17 @@ const (
 )
 
 // Server is safe for concurrent requests: the token cache and the upload table
-// have their own locks; the rest is read-only after New.
+// have their own locks; the rest is read-only after New. A reload builds a new
+// Server sharing the upload table (Reloader).
 type Server struct {
 	verifier *token.Verifier
 	bindings []Binding
 	stores   map[string]objectStore
+	place    map[string]string // volume -> its endpoint and bucket, for upload leases
 	urlLife  time.Duration
 	now      func() time.Time
 	cache    tokenCache
-	uploads  uploadTable
+	uploads  *uploadTable
 }
 
 // New builds a Server from a checked configuration.
@@ -50,8 +52,10 @@ func New(c *Config) (*Server, error) {
 	if err != nil || life < minURLExpiry || life > time.Hour {
 		return nil, fmt.Errorf("url_lifetime: between 1s and 1h")
 	}
-	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, urlLife: life, now: time.Now}
+	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
+		urlLife: life, now: time.Now, uploads: &uploadTable{}}
 	for name, vol := range c.Volumes {
+		s.place[name] = normEndpoint(vol.Endpoint) + " " + vol.Bucket
 		if s.stores[name], err = vol.store(); err != nil {
 			return nil, fmt.Errorf("volume %q: %v", name, err)
 		}

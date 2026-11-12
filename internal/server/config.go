@@ -62,10 +62,21 @@ type Binding struct {
 
 // LoadConfig reads and checks a configuration file.
 func LoadConfig(path string) (*Config, error) {
+	_, c, err := readConfig(path)
+	return c, err
+}
+
+// readConfig is LoadConfig with the bytes it parsed.
+func readConfig(path string) ([]byte, *Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	c, err := parseConfig(b, path)
+	return b, c, err
+}
+
+func parseConfig(b []byte, path string) (*Config, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
 	var c Config

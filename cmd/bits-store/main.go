@@ -21,6 +21,8 @@ func main() {
 	listen := flag.String("listen", "", "address to listen on (overrides the configuration)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	health := flag.String("health", "", "GET this /health URL, exit 0 if it answers 200 (a container's health check)")
+	check := flag.Bool("check", false, "check the configuration file and exit: 0 if the service would take it")
+	every := flag.Duration("reload-every", 5*time.Second, "how often to look for a changed configuration file; 0: never")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
@@ -29,13 +31,20 @@ func main() {
 	if *health != "" {
 		os.Exit(checkHealth(*health))
 	}
-	cfg, err := server.LoadConfig(*config)
+	if *check {
+		if err := server.CheckConfig(*config); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		fmt.Println("ok")
+		return
+	}
+	h, cfg, err := server.NewReloader(*config)
 	if err != nil {
 		log.Fatal(err)
 	}
-	s, err := server.New(cfg)
-	if err != nil {
-		log.Fatal(err)
+	if *every > 0 {
+		go h.Watch(*every)
 	}
 	addr := cfg.Listen
 	if *listen != "" {
@@ -44,7 +53,7 @@ func main() {
 	if addr == "" {
 		addr = ":8098"
 	}
-	srv := &http.Server{Addr: addr, Handler: s, ReadHeaderTimeout: 10 * time.Second,
+	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, // a promote extends its own
 		IdleTimeout:    2 * time.Minute,
 		MaxHeaderBytes: 16 << 10}

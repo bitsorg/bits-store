@@ -10,6 +10,12 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
 - `bits-store -config config.json`: see `config.example.json`. A binding maps a
   logical prefix to a volume and key prefix; GET and HEAD are redirected to presigned
   URLs (plain URLs for public bindings, which must use an anonymous volume).
+- `bits-store -check -config config.json` checks a configuration as a start would
+  (the volumes' key variables set). The running service reloads its configuration
+  when the file changes (`-reload-every`, 5s); one that fails the checks is logged and
+  the running one kept. Changed keys in the environment, or `listen`, need a restart. In a
+  container, mount the configuration's directory: a mounted single file does not see
+  a file replaced by rename.
 - A binding's `format` (`internal/format`) names the objects under its prefix;
   `blob`, the default, uses the path as the key. Formats are compiled in and
   register themselves; each has conformance cases in `format_test.go`.

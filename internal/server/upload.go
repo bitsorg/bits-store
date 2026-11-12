@@ -132,13 +132,14 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, b *Bindi
 	if u == nil || u.volume != b.Volume || u.key != key || u.sub != t.Sub || now.After(u.expires) {
 		return fail(w, http.StatusNotFound)
 	}
-	if !s.uploads.lease(u.volume, u.key, now) {
+	place := s.place[u.volume] // the bucket, not the name: a reload may rename a volume
+	if !s.uploads.lease(place, u.key, now) {
 		return failMsg(w, http.StatusConflict, "busy")
 	}
 	held := false // set when the lease must outlive this request
 	defer func() {
 		if !held {
-			s.uploads.release(u.volume, u.key)
+			s.uploads.release(place, u.key)
 		}
 	}()
 	if s.uploads.isDone(id) {
@@ -191,7 +192,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, b *Bindi
 		// the copy may still land: keep the name leased until it no longer can
 		log.Printf("promote %s: copy: %v; stat: %v", u.key, copyErr, err)
 		held = true
-		s.uploads.hold(u.volume, u.key, now.Add(copyTimeout))
+		s.uploads.hold(place, u.key, now.Add(copyTimeout))
 		return fail(w, http.StatusBadGateway) // staging kept: the client may retry later
 	case !fok:
 		log.Printf("promote %s: the copy reported success but wrote nothing", u.key)
@@ -233,12 +234,12 @@ func (ut *uploadTable) add(id string, u *upload, now time.Time, stores map[strin
 	for oid, o := range ut.m {
 		if now.After(o.expires) {
 			delete(ut.m, oid)
-			if !o.done {
+			if st := stores[o.volume]; !o.done && st != nil { // a reload may have removed the volume
 				go func(st objectStore, key string) {
 					ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 					defer cancel()
 					st.Remove(ctx, key)
-				}(stores[o.volume], o.staging)
+				}(st, o.staging)
 			}
 		} else if !o.done {
 			pending++
