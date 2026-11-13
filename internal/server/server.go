@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"path"
 	"slices"
 	"strings"
@@ -38,6 +39,7 @@ type Server struct {
 	now         func() time.Time
 	cache       tokenCache
 	found       foundCache
+	markers     markerCache
 	uploads     *uploadTable
 	fetches     *fetchTable
 	policy      *fetchPolicy
@@ -85,9 +87,9 @@ func New(c *Config) (*Server, error) {
 		// public bindings read by plain URLs; one that fetches or looks has keys
 		anon := s.stores[b.Volume].Anonymous()
 		switch {
-		case (b.mirror != nil || b.folder != nil) && anon:
+		case (b.mirror != nil || b.folder != nil || b.revisions != nil) && anon:
 			return nil, fmt.Errorf("binding %q: format %s fetches or looks objects up, so it needs a volume with keys", b.Prefix, b.Format)
-		case b.mirror == nil && b.folder == nil && b.Public != anon:
+		case b.mirror == nil && b.folder == nil && b.revisions == nil && b.Public != anon:
 			return nil, fmt.Errorf("binding %q: public bindings need an anonymous volume, private ones a volume with keys", b.Prefix)
 		}
 	}
@@ -165,13 +167,16 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		return fail(w, http.StatusNotFound), t, p // the binding's format found nothing
 	}
 	if write {
-		if b.Public {
-			return fail(w, http.StatusMethodNotAllowed), t, p
+		if s.stores[b.Volume].Anonymous() {
+			return fail(w, http.StatusMethodNotAllowed), t, p // nothing to write with
 		}
 		return s.write(w, r, rawQuery, b, key, dir, t, now), t, p
 	}
+	if q, err := url.ParseQuery(rawQuery); b.revisions != nil && err == nil && len(q) == 1 && q.Has("revisions") {
+		return s.answerRevisions(w, r, b, key, segs), t, p
+	}
 	if dir != "" {
-		if key, err = s.found.lookup(r.Context(), s, b.Volume, dir, now); err != nil {
+		if key, err = s.found.lookup(r.Context(), s, b, dir, now); err != nil {
 			log.Printf("list %s: %v", dir, err)
 			return fail(w, http.StatusBadGateway), t, p
 		} else if key == "" {
@@ -251,13 +256,23 @@ func (s *Server) resolve(segs []string) (*Binding, string, string) {
 }
 
 // lookup returns the object stored in a folder, "" for none; of several (old
-// stores), the lowest key, the same on every copy of the store.
-func (s *Server) lookup(ctx context.Context, volume, dir string) (string, error) {
-	keys, err := s.stores[volume].List(ctx, dir+"/")
+// stores), the one its format picks, the same on every copy of the store.
+func (s *Server) lookup(ctx context.Context, b *Binding, dir string) (string, error) {
+	keys, err := s.stores[b.Volume].List(ctx, dir+"/")
 	if err != nil || len(keys) == 0 {
 		return "", err
 	}
-	return slices.Min(keys), nil
+	names := make([]string, len(keys))
+	for i, k := range keys {
+		names[i] = path.Base(k)
+	}
+	return dir + "/" + b.folder.First(names), nil
+}
+
+// others reports whether a folder holds an object other than key.
+func (s *Server) others(ctx context.Context, volume, dir, key string) (bool, error) {
+	keys, err := s.stores[volume].List(ctx, dir+"/")
+	return slices.ContainsFunc(keys, func(k string) bool { return k != key }), err
 }
 
 // foundCache spares reads a listing: an object found is kept for foundTTL, a
@@ -279,8 +294,8 @@ const (
 	maxFound = 100000
 )
 
-func (c *foundCache) lookup(ctx context.Context, s *Server, volume, dir string, now time.Time) (string, error) {
-	k := s.place[volume] + "\x00" + dir
+func (c *foundCache) lookup(ctx context.Context, s *Server, b *Binding, dir string, now time.Time) (string, error) {
+	k := s.place[b.Volume] + "\x00" + dir
 	c.mu.Lock()
 	e, hit := c.hits[k]
 	m, miss := c.misses[k]
@@ -291,7 +306,7 @@ func (c *foundCache) lookup(ctx context.Context, s *Server, volume, dir string, 
 	case miss && now.Before(m.until):
 		return "", nil
 	}
-	key, err := s.lookup(ctx, volume, dir)
+	key, err := s.lookup(ctx, b, dir)
 	if err != nil {
 		return "", err
 	}

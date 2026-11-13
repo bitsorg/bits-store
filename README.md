@@ -32,12 +32,24 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   kept as bits writes it (key prefix `TARS`: `<arch>/store/<hash[:2]>/<hash>/<pkg>-
   <version>[-<revision>].<arch>.tar.gz`). `GET` or `HEAD <prefix>/<arch>/<hash>`
   redirects to it, its file name in `Bits-Object-Name` (bits-store's `404` if none; of
-  several, in old stores, the lowest name). An upload of a hash names its file in the
-  start (`"name"`, of the path's architecture); it answers `409 exists` when the hash
-  holds a file under any name, which a `HEAD` then names. bits-store finds the file by
-  listing that hash's folder (the volume's keys need `s3:ListBucket`), the index later;
-  reads remember a hit for 10 minutes, a miss for 30 seconds. Writers with keys of their
-  own can still add a second file under a hash.
+  several, in old stores, the lowest revision by number, as bits picks). An upload of a
+  hash names its file in the start (`"name"`, of the path's architecture), its declared
+  SHA-256 kept as `sha256` (`sha256:<hex>`), as bits' own writers keep it; it answers
+  `409 exists` when the hash holds a file under any name, which a `HEAD` then names.
+  bits-store finds the file by listing that hash's folder (the volume's keys need
+  `s3:ListBucket`), the index later; reads remember a hit for 10 minutes, a miss for 30
+  seconds. Writers with keys of their own can still add a second file under a hash.
+- `manifests` is bits' `MANIFESTS` area: the path is the key, as `blob` (the signed
+  common manifests), and `GET <prefix>/rev-index/<arch>/<pkg>/<version>?revisions`
+  answers `{revision: hash}` from that version's revision markers
+  (`rev-index/<arch>/<pkg>/<version>-<revision>`, each holding a hash): bits-store lists
+  them and reads each (at most 1000; beyond, `502`). A marker is written with the usual
+  upload, once (`409` when taken). Common manifests replaced in place and markers
+  deleted (`bits sign`, `bits compliance`) still need the writer's own keys.
+- A public binding on a volume with keys (`sources`, `tarballs`, `manifests`) reads by
+  plain URLs (its key prefix public-read) and takes writes from a token allowed to
+  `PUT`; one on an anonymous volume only reads. A token with a broad `PUT` pattern
+  can therefore write to public areas.
 - A `public` sources binding reads without a token, by plain URLs (make its key prefix
   public-read; the volume needs keys, to write). A miss is the bucket's `404`, and bits
   then downloads from the URL itself. Only a token with GET on the path fetches; any
@@ -61,16 +73,18 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `POST <path>?complete=<id>` promotes it with a conditional server-side copy (201,
   also on a retry), or answers 409 if the name exists (first writer wins), 422 if size
   or MD5 differ. Size and MD5 are checked; the SHA-256 is kept as the uploader's
-  `declared-sha256`. One presigned PUT takes up to 5 GiB; a promote above 5 GiB copies
-  in parts, the upload's id in the object's metadata marking it as its own.
+  `declared-sha256` (a tarball's as `sha256`). One presigned PUT takes up to 5 GiB; a
+  promote above 5 GiB copies in parts, the upload's id in the object's metadata marking
+  it as its own.
 - Uploads in parts (up to 1 TiB): `POST <path>?uploads` with `{"size", "sha256",
   "part_size", "part_md5"}` (each part's MD5, base64; parts of 5 MiB to 5 GiB, the last
   shorter, at most 10000) returns `"parts"`, a presigned `PUT` per part signing its
   `Content-MD5`; their URLs live a second per 8 MiB longer than `url_lifetime` (not
   beyond the token). `?complete=<id>` assembles the parts, `409 not-uploaded` while one
   is missing or short (put it, complete again), `422 mismatch` when one differs (start
-  over), and promotes as above. A complete keeps its upload while it may run. Parts of about 1 GiB keep the answer small. Part ETags
-  must be MD5s: no SSE-KMS or SSE-C on the bucket.
+  over), and promotes as above. A complete keeps its upload while it may run. Parts of
+  about 1 GiB keep the answer small. Part ETags must be MD5s: no SSE-KMS or SSE-C on the
+  bucket.
   First-writer-wins needs a single instance (the lease is in memory) and bits-store as
   the bucket's only writer. Give the bucket lifecycle rules expiring `STAGING/` and
   aborting incomplete multipart uploads after a day.

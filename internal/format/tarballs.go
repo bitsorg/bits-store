@@ -3,8 +3,11 @@
 package format
 
 import (
+	"cmp"
 	"errors"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -23,6 +26,31 @@ func (Tarballs) Route(rest []string) (Item, error) {
 	}
 	arch, h := rest[0], rest[1]
 	return Item{Dir: arch + "/store/" + h[:2] + "/" + h}, nil
+}
+
+// First is the lowest numeric revision, as bits picks; names without one after,
+// by name.
+func (Tarballs) First(names []string) string {
+	rev := func(n string) (int, bool) {
+		stem := strings.TrimSuffix(n, ".tar.gz") // <pkg>-<version>-<revision>.<arch>
+		stem = stem[:max(strings.LastIndex(stem, "."), 0)]
+		i := strings.LastIndex(stem, "-")
+		r, err := strconv.Atoi(stem[i+1:])
+		return r, i > 0 && err == nil && r >= 0
+	}
+	return slices.MinFunc(names, func(a, b string) int {
+		ra, oka := rev(a)
+		rb, okb := rev(b)
+		switch {
+		case oka && okb && ra != rb:
+			return cmp.Compare(ra, rb)
+		case oka != okb && oka:
+			return -1
+		case oka != okb:
+			return 1
+		}
+		return strings.Compare(a, b)
+	})
 }
 
 func (Tarballs) ObjectName(it Item, name string) error {

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -30,6 +29,8 @@ type objInfo struct {
 }
 
 const maxListed = 1000
+
+var errTooMany = fmt.Errorf("more than %d objects", maxListed)
 
 // partInfo is an uploaded part of a multipart upload; ETag without quotes.
 type partInfo struct {
@@ -56,7 +57,10 @@ type objectStore interface {
 	ListParts(ctx context.Context, key, uploadID string) ([]partInfo, error)
 	CompleteMultipart(ctx context.Context, key, uploadID string, parts []partInfo) error
 	AbortMultipart(ctx context.Context, key, uploadID string) error
-	// List returns the keys of the objects directly under the folder prefix, up to maxListed.
+	// Get returns up to limit bytes of an object; ok is false when it does not exist.
+	Get(ctx context.Context, key string, limit int64) (body []byte, ok bool, err error)
+	// List returns the keys of the objects directly under prefix (a folder, or a
+	// folder and the start of names); errTooMany beyond maxListed.
 	List(ctx context.Context, prefix string) ([]string, error)
 	// Put streams r to key, in parts of partSize when longer; meta as Copy's.
 	Put(ctx context.Context, key string, r io.Reader, partSize int64, meta map[string]string) error
@@ -180,6 +184,19 @@ func (m minioStore) AbortMultipart(ctx context.Context, key, uploadID string) er
 	return minio.Core{Client: m.c}.AbortMultipartUpload(ctx, m.bucket, key, uploadID)
 }
 
+func (m minioStore) Get(ctx context.Context, key string, limit int64) ([]byte, bool, error) {
+	o, err := m.c.GetObject(ctx, m.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, false, err
+	}
+	defer o.Close()
+	b, err := io.ReadAll(io.LimitReader(o, limit))
+	if minio.ToErrorResponse(err).StatusCode == http.StatusNotFound {
+		return nil, false, nil
+	}
+	return b, err == nil, err
+}
+
 func (m minioStore) List(ctx context.Context, prefix string) ([]string, error) {
 	ctx, cancel := context.WithCancel(ctx) // ends the listing at maxListed
 	defer cancel()
@@ -188,13 +205,13 @@ func (m minioStore) List(ctx context.Context, prefix string) ([]string, error) {
 		if o.Err != nil {
 			return nil, o.Err
 		}
-		if !strings.HasSuffix(o.Key, "/") { // a sub-folder, not an object
-			out = append(out, o.Key)
+		if strings.HasSuffix(o.Key, "/") {
+			continue // a sub-folder, not an object
 		}
 		if len(out) == maxListed {
-			log.Printf("list %s: more than %d objects, the rest left out", prefix, maxListed)
-			break
+			return nil, errTooMany // never a partial answer
 		}
+		out = append(out, o.Key)
 	}
 	return out, nil
 }
@@ -238,7 +255,10 @@ func (plainStore) CompleteMultipart(context.Context, string, string, []partInfo)
 	return errAnonymous
 }
 func (plainStore) AbortMultipart(context.Context, string, string) error { return errAnonymous }
-func (plainStore) List(context.Context, string) ([]string, error)       { return nil, errAnonymous }
+func (plainStore) Get(context.Context, string, int64) ([]byte, bool, error) {
+	return nil, false, errAnonymous
+}
+func (plainStore) List(context.Context, string) ([]string, error) { return nil, errAnonymous }
 func (plainStore) Put(context.Context, string, io.Reader, int64, map[string]string) error {
 	return errAnonymous
 }

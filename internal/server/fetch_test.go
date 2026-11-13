@@ -132,7 +132,7 @@ func TestFetchServesAMissingSource(t *testing.T) {
 		t.Fatalf("first ask: %d %s %s", w.Code, w.Header().Get("Location"), w.Body)
 	}
 	sum := sha256.Sum256(data)
-	if string(m.objs[key]) != string(data) || m.meta[key]["sha256"] != hex.EncodeToString(sum[:]) ||
+	if string(m.objs[key]) != string(data) || m.meta[key]["sha256"] != "sha256:"+hex.EncodeToString(sum[:]) ||
 		m.meta[key]["source-url"] != src {
 		t.Fatalf("stored %q with %v", m.objs[key], m.meta[key])
 	}

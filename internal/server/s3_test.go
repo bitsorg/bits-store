@@ -208,7 +208,7 @@ func TestS3Fetch(t *testing.T) {
 		resp.Body.Close()
 		sum := sha256.Sum256(data)
 		fi, _, err := st.Stat(ctx, key)
-		if !bytes.Equal(got, data) || err != nil || fi.Meta["sha256"] != hex.EncodeToString(sum[:]) || fi.Meta["source-url"] != src {
+		if !bytes.Equal(got, data) || err != nil || fi.Meta["sha256"] != "sha256:"+hex.EncodeToString(sum[:]) || fi.Meta["source-url"] != src {
 			t.Fatalf("%d bytes: read %d, %+v %v", len(data), len(got), fi, err)
 		}
 		t.Logf("%d bytes: ETag %s", len(data), fi.ETag)
@@ -338,5 +338,46 @@ func TestS3Tarballs(t *testing.T) {
 	}
 	if w := post(s, tarPath+"?uploads", tok, named("ROOT-6.32.02-2.x86_64-el9.tar.gz", data)); w.Code != 409 {
 		t.Fatalf("a second name: %d", w.Code)
+	}
+}
+
+// TestS3Revisions answers ?revisions from markers on a real S3 endpoint (as TestS3).
+func TestS3Revisions(t *testing.T) {
+	ep, bucket := os.Getenv("BITS_STORE_S3IT_ENDPOINT"), os.Getenv("BITS_STORE_S3IT_BUCKET")
+	if ep == "" || bucket == "" {
+		t.Skip("BITS_STORE_S3IT_ENDPOINT and BITS_STORE_S3IT_BUCKET not set")
+	}
+	s, _, _ := setup(t)
+	vol := VolumeConf{Endpoint: ep, Bucket: bucket, Region: "us-east-1", AllowHTTP: strings.HasPrefix(ep, "http:"),
+		AccessKeyEnv: "BITS_STORE_S3IT_ACCESS_KEY", SecretKeyEnv: "BITS_STORE_S3IT_SECRET_KEY"}
+	st, err := vol.store()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.stores["s3"] = st
+	ctx := context.Background()
+	a := strings.Repeat("a", 40)
+	dir := "MM/rev-index/x86_64-el9/zlib/"
+	// another version's markers, more than one listing returns, do not hide this one's
+	names := []string{"v1.3-1", "v1.3-alice2-3"}
+	for i := range maxListed + 1 {
+		names = append(names, fmt.Sprintf("v1.2-%d", i))
+	}
+	for _, k := range names {
+		if err := st.Put(ctx, dir+k, strings.NewReader(a+"\n"), 5<<20, nil); err != nil {
+			t.Fatal(err)
+		}
+		defer st.Remove(ctx, dir+k)
+	}
+	w := do(s, "GET", revPath+"?revisions", nil)
+	var got map[string]string
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &got) != nil || len(got) != 1 || got["1"] != a {
+		t.Fatalf("revisions: %d %s", w.Code, w.Body)
+	}
+	if _, err := st.List(ctx, dir); err != errTooMany {
+		t.Fatalf("a listing beyond the limit: %v", err)
+	}
+	if _, ok, err := st.Get(ctx, dir+"v1.3-9", 10); ok || err != nil {
+		t.Fatalf("a missing marker: %v %v", ok, err)
 	}
 }

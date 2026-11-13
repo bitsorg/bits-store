@@ -23,6 +23,11 @@ var conformance = map[string][]routeCase{
 		{[]string{"x86_64-el10-gcc14-opt", "ab", "h"}, "x86_64-el10-gcc14-opt/ab/h"},
 		{nil, ""},
 	},
+	"manifests": {
+		{[]string{"common-manifest-x86_64-el9.json"}, "common-manifest-x86_64-el9.json"},
+		{[]string{"rev-index", "x86_64-el9", "zlib", "v1.3-1"}, "rev-index/x86_64-el9/zlib/v1.3-1"},
+		{nil, ""},
+	},
 	"tarballs": {
 		{[]string{"x86_64-el9", "0123456789abcdef0123456789abcdef01234567"}, "dir:x86_64-el9/store/01/0123456789abcdef0123456789abcdef01234567"},
 		{[]string{"x86_64-el9", "0123456789ABCDEF0123456789abcdef01234567"}, ""},
@@ -119,6 +124,30 @@ func TestTarballNames(t *testing.T) {
 	} {
 		if err := (Tarballs{}).ObjectName(it, name); (err == nil) != ok {
 			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestTarballFirst(t *testing.T) {
+	for want, names := range map[string][]string{
+		"ROOT-6-2.a.tar.gz":      {"ROOT-6-10.a.tar.gz", "ROOT-6-2.a.tar.gz"},
+		"ROOT-6-1.a.tar.gz":      {"ROOT-6-local1.a.tar.gz", "ROOT-6-1.a.tar.gz", "ROOT-6-0123456789abcdef0123456789abcdef01234567.a.tar.gz"},
+		"ROOT-6-local1.a.tar.gz": {"ROOT-6-local2.a.tar.gz", "ROOT-6-local1.a.tar.gz"},
+		"zlib-v1.3.x86.tar.gz":   {"zlib-v1.3.x86.tar.gz"},
+	} {
+		if got := (Tarballs{}).First(names); got != want {
+			t.Errorf("First(%q) = %q, want %q", names, got, want)
+		}
+	}
+}
+
+func TestRevisionsOf(t *testing.T) {
+	if err := (Manifests{}).RevisionsOf([]string{"rev-index", "x86_64-el9", "zlib", "v1.3-alice2"}); err != nil {
+		t.Error(err)
+	}
+	for _, rest := range [][]string{{"rev-index", "a", "b"}, {"other", "a", "b", "c"}, {"rev-index", "a", "b", "c", "d"}} {
+		if err := (Manifests{}).RevisionsOf(rest); err == nil {
+			t.Errorf("%q accepted", rest)
 		}
 	}
 }

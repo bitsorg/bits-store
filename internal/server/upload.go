@@ -32,7 +32,8 @@ import (
 //	                                or is being promoted, 422 wrong size or MD5
 //
 // Size and MD5 are checked; the SHA-256 is the uploader's declaration, kept as
-// "declared-sha256". First-writer-wins needs one instance: the lease is in memory.
+// "declared-sha256" (a tarball's as "sha256", bits' name). First-writer-wins needs one
+// instance: the lease is in memory.
 const (
 	stagingPrefix = "STAGING"
 	maxUpload     = 5 << 30 // one presigned PUT; more in parts
@@ -124,6 +125,9 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 	}
 	u := &upload{volume: b.Volume, key: key, dir: dir, sub: t.Sub, size: req.Size, sha256: req.SHA256,
 		meta: map[string]string{"declared-sha256": req.SHA256}}
+	if dir != "" {
+		u.meta = map[string]string{"sha256": "sha256:" + req.SHA256} // as bits' own writers keep it
+	}
 	if req.PartMD5 != nil {
 		var ok bool
 		u.partMD5, u.md5Hex, ok = checkParts(req.Size, req.PartSize, req.PartMD5)
@@ -150,10 +154,10 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 		return failMsg(w, http.StatusConflict, "exists")
 	}
 	if dir != "" {
-		if found, err := s.lookup(r.Context(), b.Volume, dir); err != nil {
+		if found, err := s.others(r.Context(), b.Volume, dir, ""); err != nil {
 			log.Printf("list %s: %v", dir, err)
 			return fail(w, http.StatusBadGateway)
-		} else if found != "" {
+		} else if found {
 			return failMsg(w, http.StatusConflict, "exists") // under another name
 		}
 	}
@@ -270,9 +274,9 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 		return http.StatusCreated, ""
 	}
 	if u.dir != "" {
-		if found, err := s.lookup(ctx, u.volume, u.dir); err != nil {
+		if found, err := s.others(ctx, u.volume, u.dir, u.key); err != nil {
 			return http.StatusBadGateway, ""
-		} else if found != "" && found != u.key {
+		} else if found {
 			return drop(http.StatusConflict, "exists") // another name came first
 		}
 	}

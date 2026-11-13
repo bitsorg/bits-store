@@ -3,6 +3,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"slices"
 	"strings"
@@ -82,11 +84,11 @@ func TestTarballFirstWriterWins(t *testing.T) {
 	if w := post(s, tarPath+"?uploads", tok, named(tarName, []byte("mine"))); w.Code != 409 {
 		t.Fatalf("start over another name: %d", w.Code)
 	}
-	// two objects under one hash (old stores): the lowest name, whatever the order
-	m.upload(tarDir+"/"+tarName, []byte("second"))
+	// two objects under one hash (old stores): the lowest revision, by number
+	m.upload(tarDir+"/ROOT-6.32.02-10.x86_64-el9.tar.gz", []byte("tenth"))
 	m.upload(tarDir+"/sub/a.x86_64-el9.tar.gz", []byte("not in the folder"))
 	w := do(s, "GET", tarPath, map[string]string{"Authorization": "Bearer " + tok})
-	if w.Code != 302 || w.Header().Get("Bits-Object-Name") != tarName {
+	if w.Code != 302 || w.Header().Get("Bits-Object-Name") != other {
 		t.Fatalf("two objects: %d %v", w.Code, w.Header())
 	}
 }
@@ -220,8 +222,29 @@ func TestPublicTarballs(t *testing.T) {
 			t.Fatalf("anonymous %s: %d %v", method, w.Code, w.Header())
 		}
 	}
-	if w := post(s, pub+"?uploads", tok, named(tarName, []byte("x"))); w.Code != 405 {
-		t.Fatalf("write to a public binding: %d", w.Code)
+	// a public binding with keys takes a token's writes; anyone reads them
+	if w := post(s, pub+"?uploads", tok, named(tarName, []byte("x"))); w.Code != 409 {
+		t.Fatalf("write over the stored build: %d", w.Code)
+	}
+	other := strings.Replace(pub, tarHash, strings.Repeat("cd", 20), 1)
+	w := post(s, other+"?uploads", tok, named(tarName, []byte("new")))
+	var st started
+	if w.Code != 201 || json.Unmarshal(w.Body.Bytes(), &st) != nil {
+		t.Fatalf("write to a public binding: %d %s", w.Code, w.Body)
+	}
+	m.upload("STAGING/"+st.ID, []byte("new"))
+	if w := post(s, other+"?complete="+st.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("complete: %d", w.Code)
+	}
+	newKey := "PUBT/x86_64-el9/store/cd/" + strings.Repeat("cd", 20) + "/" + tarName
+	if sum := sha256.Sum256([]byte("new")); m.meta[newKey]["sha256"] != "sha256:"+hex.EncodeToString(sum[:]) || m.meta[newKey]["declared-sha256"] != "" {
+		t.Fatalf("a build's sha256 not under bits' name: %v", m.meta[newKey])
+	}
+	if w := do(s, "GET", other, nil); w.Code != 302 {
+		t.Fatalf("anonymous read of it: %d", w.Code)
+	}
+	if w := post(s, other+"?uploads", "", named(tarName, []byte("x"))); w.Code != 401 {
+		t.Fatalf("a write without a token: %d", w.Code)
 	}
 }
 
@@ -240,5 +263,31 @@ func TestTarballStaleMissIsNotKept(t *testing.T) {
 	}
 	if w := do(s, "GET", tarPath, auth); w.Code != 302 {
 		t.Fatalf("after the store: %d", w.Code)
+	}
+}
+
+// The copy landed but its answer was lost: the retry finds its own file, not another.
+func TestTarballLostAnswer(t *testing.T) {
+	s, tok, now := setup(t)
+	m := newMem()
+	s.stores["s3"] = m
+	st := startNamed(t, s, tok, tarName, []byte("x"))
+	m.upload("STAGING/"+st.ID, []byte("x"))
+	m.beforeCopy = func() { m.statFails = tarDir + "/" + tarName }
+	if w := post(s, tarPath+"?complete="+st.ID, tok, ""); w.Code != 502 {
+		t.Fatalf("lost answer: %d", w.Code)
+	}
+	m.beforeCopy = nil
+	s.now = func() time.Time { return now.Add(copyTimeout + time.Second) } // past the hold
+	if w := post(s, tarPath+"?complete="+st.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("retry: %d %s", w.Code, w.Body)
+	}
+}
+
+func TestAnAnonymousVolumeTakesNoWrites(t *testing.T) {
+	s, tok, _ := setup(t)
+	s.stores["s3"] = newMem()
+	if w := post(s, "/store/lhcb/x86_64-el10-gcc14-opt/anon/x?uploads", tok, body([]byte("x"))); w.Code != 405 {
+		t.Fatalf("%d %s", w.Code, w.Body)
 	}
 }

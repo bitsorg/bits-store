@@ -33,9 +33,16 @@ type Mirror interface {
 }
 
 // Folder is a format of Dir items: ObjectName says whether a write may give the
-// object in it that name.
+// object in it that name; First picks the object of several names (old stores).
 type Folder interface {
 	ObjectName(it Item, name string) error
+	First(names []string) string
+}
+
+// Revisions is a format answering ?revisions on a path: {revision: hash} from the
+// objects named <its key>-<revision>, each holding a hash. RevisionsOf checks the path.
+type Revisions interface {
+	RevisionsOf(rest []string) error
 }
 
 var (

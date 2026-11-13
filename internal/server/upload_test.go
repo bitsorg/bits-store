@@ -38,6 +38,7 @@ type memStore struct {
 	mp         map[string]map[int][]byte // multipart uploads' parts, by upload id
 	mpKey      map[string]string         // their keys
 	listFails  bool
+	getFails   bool
 	listed     int    // List calls
 	afterList  func() // runs once a listing is taken, before it is returned
 	mpSeq      int
@@ -46,6 +47,15 @@ type memStore struct {
 func newMem() *memStore {
 	return &memStore{objs: map[string][]byte{}, meta: map[string]map[string]string{}, parted: map[string]bool{},
 		etags: map[string]string{}, mp: map[string]map[int][]byte{}, mpKey: map[string]string{}}
+}
+func (m *memStore) Get(_ context.Context, key string, limit int64) ([]byte, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.getFails {
+		return nil, false, fmt.Errorf("get failed")
+	}
+	b, ok := m.objs[key]
+	return b[:min(int64(len(b)), limit)], ok, nil
 }
 func (m *memStore) List(_ context.Context, prefix string) ([]string, error) {
 	m.mu.Lock()
@@ -59,6 +69,9 @@ func (m *memStore) List(_ context.Context, prefix string) ([]string, error) {
 		if rest, ok := strings.CutPrefix(k, prefix); ok && !strings.Contains(rest, "/") {
 			out = append(out, k)
 		}
+	}
+	if len(out) > maxListed {
+		return nil, errTooMany
 	}
 	if f := m.afterList; f != nil {
 		m.afterList = nil

@@ -277,7 +277,7 @@ func (s *Server) fetch(volume string, maxSize int64, key, src, sub string) (n in
 	sum := hex.EncodeToString(body.sha.Sum(nil))
 	u := &upload{volume: volume, key: key, staging: staging, size: body.n, fetched: true,
 		md5Hex: hex.EncodeToString(body.md5.Sum(nil)), sha256: sum,
-		meta: map[string]string{"sha256": sum, "source-url": src, "fetched-by": url.PathEscape(sub)}}
+		meta: map[string]string{"sha256": "sha256:" + sum, "source-url": src, "fetched-by": url.PathEscape(sub)}}
 	switch code, msg := s.promote(context.Background(), u, id, s.now()); {
 	case code == http.StatusCreated || msg == "exists":
 		return body.n, nil

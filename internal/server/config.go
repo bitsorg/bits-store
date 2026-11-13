@@ -71,8 +71,9 @@ type Binding struct {
 	MaxSize   int64  `json:"max_size"` // bytes a fetch may bring (Mirror formats); 0: 32 GiB
 	segs      []string
 	format    format.Format
-	mirror    format.Mirror // the format, when it fetches what is missing
-	folder    format.Folder // the format, when its items are folders holding one object
+	mirror    format.Mirror    // the format, when it fetches what is missing
+	folder    format.Folder    // the format, when its items are folders holding one object
+	revisions format.Revisions // the format, when it answers ?revisions
 }
 
 const defaultMaxSize = 32 << 30
@@ -185,6 +186,7 @@ func (c *Config) bindings() ([]Binding, error) {
 		}
 		b.mirror, _ = b.format.(format.Mirror)
 		b.folder, _ = b.format.(format.Folder)
+		b.revisions, _ = b.format.(format.Revisions)
 		switch {
 		case b.mirror == nil && b.MaxSize != 0:
 			return nil, fmt.Errorf("binding %q: max_size is for formats that fetch", b.Prefix)

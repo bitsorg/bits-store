@@ -79,6 +79,7 @@ func setup(t *testing.T) (s *Server, good string, now time.Time) {
 			"s3":   {Endpoint: "https://s3.example.org", Bucket: "bits", Region: "us-east-1", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"},
 			"pub":  {Endpoint: "https://s3.example.org", Bucket: "open", Region: "us-east-1"},
 			"pub2": {Endpoint: "https://s3.example.org", Bucket: "open2", Region: "us-east-1"},
+			"pub3": {Endpoint: "https://s3.example.org", Bucket: "open3", Region: "us-east-1"},
 		},
 		Bindings: []Binding{
 			{Prefix: "/store/lhcb", Volume: "s3", KeyPrefix: "TARS"},
@@ -93,6 +94,9 @@ func setup(t *testing.T) (s *Server, good string, now time.Time) {
 			{Prefix: "/pubsrc", Volume: "s3", KeyPrefix: "PUBSRC2", Format: "sources", Public: true}, // beyond the token
 			{Prefix: "/store/lhcb/x86_64-el10-gcc14-opt/t", Volume: "s3", KeyPrefix: "TT", Format: "tarballs"},
 			{Prefix: "/store/lhcb/x86_64-el10-gcc14-opt/pt", Volume: "s3", KeyPrefix: "PUBT", Format: "tarballs", Public: true}, // within the PUT
+			{Prefix: "/store/lhcb/x86_64-el10-gcc14-opt/m", Volume: "s3", KeyPrefix: "MM", Format: "manifests", Public: true},
+			{Prefix: "/store/lhcb/x86_64-el10-gcc14-opt/pm", Volume: "s3", KeyPrefix: "PM", Format: "manifests"},
+			{Prefix: "/store/lhcb/x86_64-el10-gcc14-opt/anon", Volume: "pub3", Public: true}, // within the PUT
 		}}
 	if s, err = New(c); err != nil {
 		t.Fatal(err)
@@ -250,6 +254,7 @@ func TestConfigRefused(t *testing.T) {
 		"max-lifetime-zero":   func(c *Config) { c.MaxLifetime = "0s" },
 		"mirror-anonymous":    func(c *Config) { c.Bindings[0].Format = "sources" },
 		"tarballs-anonymous":  func(c *Config) { c.Bindings[0].Format = "tarballs" },
+		"manifests-anonymous": func(c *Config) { c.Bindings[0].Format = "manifests" },
 		"max-size-not-mirror": func(c *Config) { c.Bindings[0].MaxSize = 1 },
 		"access-log":          func(c *Config) { c.AccessLog = "some" },
 		"site-range":          func(c *Config) { c.Fetch.SiteRanges = []string{"10.0.0.0"} },
