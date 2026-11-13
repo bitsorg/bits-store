@@ -6,10 +6,12 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"log"
 	"net/http"
+	"path"
 	"slices"
 	"strings"
 	"sync"
@@ -35,6 +37,7 @@ type Server struct {
 	urlLife     time.Duration
 	now         func() time.Time
 	cache       tokenCache
+	found       foundCache
 	uploads     *uploadTable
 	fetches     *fetchTable
 	policy      *fetchPolicy
@@ -79,12 +82,12 @@ func New(c *Config) (*Server, error) {
 		}
 	}
 	for _, b := range bs {
-		// public bindings read by plain URLs; a fetching one has keys, to write
+		// public bindings read by plain URLs; one that fetches or looks has keys
 		anon := s.stores[b.Volume].Anonymous()
 		switch {
-		case b.mirror != nil && anon:
-			return nil, fmt.Errorf("binding %q: format %s fetches, so it needs a volume with keys", b.Prefix, b.Format)
-		case b.mirror == nil && b.Public != anon:
+		case (b.mirror != nil || b.folder != nil) && anon:
+			return nil, fmt.Errorf("binding %q: format %s fetches or looks objects up, so it needs a volume with keys", b.Prefix, b.Format)
+		case b.mirror == nil && b.folder == nil && b.Public != anon:
 			return nil, fmt.Errorf("binding %q: public bindings need an anonymous volume, private ones a volume with keys", b.Prefix)
 		}
 	}
@@ -130,7 +133,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 	if err != nil {
 		return fail(w, http.StatusBadRequest), nil, p
 	}
-	b, key := s.resolve(segs)
+	b, key, dir := s.resolve(segs)
 	now := s.now()
 	// a public fetching binding reads without a token; asking for a fetch takes one
 	fetchAsk := !write && b != nil && b.mirror != nil && rawQuery != "" && bearer(r) != ""
@@ -158,14 +161,23 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 			t = nil // a public read, without the fetch the token may not ask for
 		}
 	}
-	if key == "" {
+	if key == "" && dir == "" {
 		return fail(w, http.StatusNotFound), t, p // the binding's format found nothing
 	}
 	if write {
 		if b.Public {
 			return fail(w, http.StatusMethodNotAllowed), t, p
 		}
-		return s.write(w, r, rawQuery, b, key, t, now), t, p
+		return s.write(w, r, rawQuery, b, key, dir, t, now), t, p
+	}
+	if dir != "" {
+		if key, err = s.found.lookup(r.Context(), s, b.Volume, dir, now); err != nil {
+			log.Printf("list %s: %v", dir, err)
+			return fail(w, http.StatusBadGateway), t, p
+		} else if key == "" {
+			return fail(w, http.StatusNotFound), t, p
+		}
+		w.Header().Set("Bits-Object-Name", path.Base(key))
 	}
 	if b.mirror != nil && rawQuery != "" && t != nil {
 		return s.fetchRead(w, r, rawQuery, b, key, t, now), t, p
@@ -196,9 +208,9 @@ func (s *Server) redirect(w http.ResponseWriter, r *http.Request, b *Binding, ke
 	return http.StatusFound
 }
 
-// resolve finds the binding with the longest prefix and the object key under
-// it; the key is empty when the binding's format finds no object.
-func (s *Server) resolve(segs []string) (*Binding, string) {
+// resolve finds the binding with the longest prefix and the object key, or the
+// folder holding it (format.Item), under it; both empty when the format finds none.
+func (s *Server) resolve(segs []string) (*Binding, string, string) {
 	for i := range s.bindings {
 		b := &s.bindings[i]
 		if len(segs) <= len(b.segs) {
@@ -215,19 +227,104 @@ func (s *Server) resolve(segs []string) (*Binding, string) {
 			// a format's key stays within the path rules, so under its key prefix
 			it, err := b.format.Route(slices.Clone(segs[len(b.segs):]))
 			if err != nil {
-				return b, ""
+				return b, "", ""
 			}
-			if _, err := token.ParsePath("/" + it.Key); err != nil {
-				log.Printf("format %s: bad key %q", b.Format, it.Key)
-				return b, ""
+			if (it.Key == "") == (it.Dir == "") || it.Dir != "" && b.folder == nil {
+				log.Printf("format %s: neither a key nor a folder of its own", b.Format)
+				return b, "", ""
 			}
-			if b.KeyPrefix == "" {
-				return b, it.Key
+			if _, err := token.ParsePath("/" + it.Key + it.Dir); err != nil {
+				log.Printf("format %s: bad key %q", b.Format, it.Key+it.Dir)
+				return b, "", ""
 			}
-			return b, b.KeyPrefix + "/" + it.Key
+			pre := ""
+			if b.KeyPrefix != "" {
+				pre = b.KeyPrefix + "/"
+			}
+			if it.Dir != "" {
+				return b, "", pre + it.Dir
+			}
+			return b, pre + it.Key, ""
 		}
 	}
-	return nil, ""
+	return nil, "", ""
+}
+
+// lookup returns the object stored in a folder, "" for none; of several (old
+// stores), the lowest key, the same on every copy of the store.
+func (s *Server) lookup(ctx context.Context, volume, dir string) (string, error) {
+	keys, err := s.stores[volume].List(ctx, dir+"/")
+	if err != nil || len(keys) == 0 {
+		return "", err
+	}
+	return slices.Min(keys), nil
+}
+
+// foundCache spares reads a listing: an object found is kept for foundTTL, a
+// miss for missTTL (apart, so misses never flush hits), unless this instance
+// stores one. Writes never use it.
+type foundCache struct {
+	mu           sync.Mutex
+	hits, misses map[string]foundEntry
+}
+
+type foundEntry struct {
+	key   string
+	until time.Time
+}
+
+const (
+	foundTTL = 10 * time.Minute // a deleted object (GC) is noticed after this
+	missTTL  = 30 * time.Second
+	maxFound = 100000
+)
+
+func (c *foundCache) lookup(ctx context.Context, s *Server, volume, dir string, now time.Time) (string, error) {
+	k := s.place[volume] + "\x00" + dir
+	c.mu.Lock()
+	e, hit := c.hits[k]
+	m, miss := c.misses[k]
+	c.mu.Unlock()
+	switch {
+	case hit && now.Before(e.until):
+		return e.key, nil
+	case miss && now.Before(m.until):
+		return "", nil
+	}
+	key, err := s.lookup(ctx, volume, dir)
+	if err != nil {
+		return "", err
+	}
+	if key != "" {
+		c.set(k, key, now)
+	} else { // a hit, from a store here meanwhile, still comes first
+		c.mu.Lock()
+		c.misses = bounded(c.misses)
+		c.misses[k] = foundEntry{"", now.Add(missTTL)}
+		c.mu.Unlock()
+	}
+	return key, nil
+}
+
+// stored records an object this instance stored in a folder.
+func (c *foundCache) stored(s *Server, volume, dir, key string, now time.Time) {
+	c.set(s.place[volume]+"\x00"+dir, key, now)
+}
+
+func (c *foundCache) set(k, key string, now time.Time) {
+	c.mu.Lock()
+	c.hits = bounded(c.hits)
+	c.hits[k] = foundEntry{key, now.Add(foundTTL)}
+	delete(c.misses, k)
+	c.mu.Unlock()
+}
+
+// bounded is m, or a new map when m is missing or full: a simple bound.
+func bounded(m map[string]foundEntry) map[string]foundEntry {
+	if m == nil || len(m) >= maxFound {
+		return map[string]foundEntry{}
+	}
+	return m
 }
 
 // bearer returns the token: the Authorization header when there is one, else

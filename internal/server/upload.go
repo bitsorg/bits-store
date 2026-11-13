@@ -13,9 +13,11 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/bitsorg/bits-store/internal/format"
 	"github.com/bitsorg/bits-store/internal/token"
 )
 
@@ -23,7 +25,8 @@ import (
 //
 //	POST <path>?uploads          {"size", "md5" (base64), "sha256" (hex)}
 //	                             -> 201 {"id", "url", "method", "headers", "expires", "complete_by"}
-//	                             (in parts, multipart.go: "part_size", "part_md5" -> "parts")
+//	                             (in parts, multipart.go: "part_size", "part_md5" -> "parts";
+//	                             a folder's object, format.Folder: "name")
 //	PUT  <url> with the headers  (straight to the volume, into STAGING/<id>)
 //	POST <path>?complete=<id>    -> 201 promoted (also on a retry), 409 the name exists
 //	                                or is being promoted, 422 wrong size or MD5
@@ -54,6 +57,7 @@ var sha256Hex = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 type upload struct {
 	volume, key, staging, sub string
+	dir                       string // the folder of a named upload (format.Folder)
 	size                      int64
 	md5Hex, sha256            string
 	meta                      map[string]string // the final object's, with bits-upload
@@ -81,21 +85,24 @@ func failMsg(w http.ResponseWriter, code int, msg string) int {
 	return code
 }
 
-func (s *Server) write(w http.ResponseWriter, r *http.Request, rawQuery string, b *Binding, key string, t *token.Token, now time.Time) int {
+// write takes an upload of key, or of the object of folder dir (format.Folder),
+// which the start names ("name").
+func (s *Server) write(w http.ResponseWriter, r *http.Request, rawQuery string, b *Binding, key, dir string, t *token.Token, now time.Time) int {
 	q, err := url.ParseQuery(rawQuery)
 	switch {
 	case err != nil || len(q) != 1:
 		return fail(w, http.StatusBadRequest)
 	case q.Has("uploads") && q.Get("uploads") == "":
-		return s.startUpload(w, r, b, key, t, now)
+		return s.startUpload(w, r, b, key, dir, t, now)
 	case q.Get("complete") != "":
-		return s.completeUpload(w, r, b, key, q.Get("complete"), t, now)
+		return s.completeUpload(w, r, b, key+dir, q.Get("complete"), t, now)
 	}
 	return fail(w, http.StatusBadRequest)
 }
 
-func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding, key string, t *token.Token, now time.Time) int {
+func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding, key, dir string, t *token.Token, now time.Time) int {
 	var req struct {
+		Name     string   `json:"name"`
 		Size     int64    `json:"size"`
 		MD5      string   `json:"md5"`
 		SHA256   string   `json:"sha256"`
@@ -104,10 +111,18 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 	}
 	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	dec.DisallowUnknownFields()
-	if dec.Decode(&req) != nil || req.Size <= 0 || !sha256Hex.MatchString(req.SHA256) {
+	if dec.Decode(&req) != nil || req.Size <= 0 || !sha256Hex.MatchString(req.SHA256) || (dir == "") != (req.Name == "") {
 		return failMsg(w, http.StatusBadRequest, "bad-request")
 	}
-	u := &upload{volume: b.Volume, key: key, sub: t.Sub, size: req.Size, sha256: req.SHA256,
+	if dir != "" {
+		item := format.Item{Dir: b.unprefixed(dir)}
+		if _, err := token.ParsePath("/" + req.Name); err != nil || strings.Contains(req.Name, "/") ||
+			b.folder.ObjectName(item, req.Name) != nil {
+			return failMsg(w, http.StatusBadRequest, "bad-name")
+		}
+		key = dir + "/" + req.Name
+	}
+	u := &upload{volume: b.Volume, key: key, dir: dir, sub: t.Sub, size: req.Size, sha256: req.SHA256,
 		meta: map[string]string{"declared-sha256": req.SHA256}}
 	if req.PartMD5 != nil {
 		var ok bool
@@ -133,6 +148,14 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 		return fail(w, http.StatusBadGateway)
 	} else if exists {
 		return failMsg(w, http.StatusConflict, "exists")
+	}
+	if dir != "" {
+		if found, err := s.lookup(r.Context(), b.Volume, dir); err != nil {
+			log.Printf("list %s: %v", dir, err)
+			return fail(w, http.StatusBadGateway)
+		} else if found != "" {
+			return failMsg(w, http.StatusConflict, "exists") // under another name
+		}
 	}
 	idb := make([]byte, 16)
 	rand.Read(idb)
@@ -175,8 +198,8 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 	return http.StatusCreated
 }
 
-func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, b *Binding, key, id string, t *token.Token, now time.Time) int {
-	u := s.uploads.claim(id, b.Volume, key, t.Sub, now)
+func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, b *Binding, at, id string, t *token.Token, now time.Time) int {
+	u := s.uploads.claim(id, b.Volume, at, t.Sub, now)
 	if u == nil {
 		return fail(w, http.StatusNotFound)
 	}
@@ -202,13 +225,17 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, b *Bindi
 // code with the message for failMsg ("" for none).
 func (s *Server) promote(parent context.Context, u *upload, id string, now time.Time) (int, string) {
 	place := s.place[u.volume] // the bucket, not the name: a reload may rename a volume
-	if !s.uploads.lease(place, u.key, now) {
+	name := u.key
+	if u.dir != "" {
+		name = u.dir + "/" // the folder: one object in it
+	}
+	if !s.uploads.lease(place, name, now) {
 		return http.StatusConflict, "busy"
 	}
 	held := false // set when the lease must outlive this request
 	defer func() {
 		if !held {
-			s.uploads.release(place, u.key)
+			s.uploads.release(place, name)
 		}
 	}()
 	if s.uploads.isDone(id) {
@@ -234,10 +261,20 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 	ours := func(i objInfo) bool { return staged(i) || (u.size > maxCopy || u.uploadID != "") && marked(i) }
 	done := func() (int, string) {
 		s.uploads.markDone(id) // first: a retry must not look for the staged object
+		if u.dir != "" {
+			s.found.stored(s, u.volume, u.dir, u.key, now)
+		}
 		if err := st.Remove(ctx, u.staging); err != nil {
 			log.Printf("remove %s: %v", u.staging, err)
 		}
 		return http.StatusCreated, ""
+	}
+	if u.dir != "" {
+		if found, err := s.lookup(ctx, u.volume, u.dir); err != nil {
+			return http.StatusBadGateway, ""
+		} else if found != "" && found != u.key {
+			return drop(http.StatusConflict, "exists") // another name came first
+		}
 	}
 	if fi, exists, err := st.Stat(ctx, u.key); err != nil {
 		return http.StatusBadGateway, ""
@@ -274,7 +311,7 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 		// the copy may still land: keep the name leased until it no longer can
 		log.Printf("promote %s: copy: %v; stat: %v", u.key, copyErr, err)
 		held = true
-		s.uploads.hold(place, u.key, now.Add(copyTime(u.size)))
+		s.uploads.hold(place, name, now.Add(copyTime(u.size)))
 		return http.StatusBadGateway, "" // staging kept: the client may retry later
 	case !fok:
 		log.Printf("promote %s: the copy reported success but wrote nothing", u.key)
@@ -342,11 +379,11 @@ func (ut *uploadTable) add(id string, u *upload, now time.Time, stores map[strin
 
 // claim returns its owner's pending upload for a complete, kept at least until the
 // complete can no longer run; nil when there is none.
-func (ut *uploadTable) claim(id, volume, key, sub string, now time.Time) *upload {
+func (ut *uploadTable) claim(id, volume, at, sub string, now time.Time) *upload {
 	ut.mu.Lock()
 	defer ut.mu.Unlock()
 	u := ut.m[id]
-	if u == nil || u.volume != volume || u.key != key || u.sub != sub || now.After(u.expires) {
+	if u == nil || u.volume != volume || u.key != at && u.dir != at || u.sub != sub || now.After(u.expires) {
 		return nil
 	}
 	if until := now.Add(completeTime(u.size)); u.expires.Before(until) {

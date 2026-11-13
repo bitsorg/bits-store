@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -27,6 +28,8 @@ type objInfo struct {
 	ETag string
 	Meta map[string]string
 }
+
+const maxListed = 1000
 
 // partInfo is an uploaded part of a multipart upload; ETag without quotes.
 type partInfo struct {
@@ -53,6 +56,8 @@ type objectStore interface {
 	ListParts(ctx context.Context, key, uploadID string) ([]partInfo, error)
 	CompleteMultipart(ctx context.Context, key, uploadID string, parts []partInfo) error
 	AbortMultipart(ctx context.Context, key, uploadID string) error
+	// List returns the keys of the objects directly under the folder prefix, up to maxListed.
+	List(ctx context.Context, prefix string) ([]string, error)
 	// Put streams r to key, in parts of partSize when longer; meta as Copy's.
 	Put(ctx context.Context, key string, r io.Reader, partSize int64, meta map[string]string) error
 	Remove(ctx context.Context, key string) error
@@ -175,6 +180,25 @@ func (m minioStore) AbortMultipart(ctx context.Context, key, uploadID string) er
 	return minio.Core{Client: m.c}.AbortMultipartUpload(ctx, m.bucket, key, uploadID)
 }
 
+func (m minioStore) List(ctx context.Context, prefix string) ([]string, error) {
+	ctx, cancel := context.WithCancel(ctx) // ends the listing at maxListed
+	defer cancel()
+	var out []string
+	for o := range m.c.ListObjects(ctx, m.bucket, minio.ListObjectsOptions{Prefix: prefix}) {
+		if o.Err != nil {
+			return nil, o.Err
+		}
+		if !strings.HasSuffix(o.Key, "/") { // a sub-folder, not an object
+			out = append(out, o.Key)
+		}
+		if len(out) == maxListed {
+			log.Printf("list %s: more than %d objects, the rest left out", prefix, maxListed)
+			break
+		}
+	}
+	return out, nil
+}
+
 func (m minioStore) Remove(ctx context.Context, key string) error {
 	return m.c.RemoveObject(ctx, m.bucket, key, minio.RemoveObjectOptions{})
 }
@@ -214,6 +238,7 @@ func (plainStore) CompleteMultipart(context.Context, string, string, []partInfo)
 	return errAnonymous
 }
 func (plainStore) AbortMultipart(context.Context, string, string) error { return errAnonymous }
+func (plainStore) List(context.Context, string) ([]string, error)       { return nil, errAnonymous }
 func (plainStore) Put(context.Context, string, io.Reader, int64, map[string]string) error {
 	return errAnonymous
 }

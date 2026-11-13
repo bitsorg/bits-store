@@ -11,10 +11,11 @@ import (
 	"sync"
 )
 
-// Item is the object a path names. Key is relative to the binding's key prefix
-// and must follow the path rules of docs/TOKEN.md: the core refuses it otherwise.
+// Item is the object a path names: its Key, or a Dir holding one object, which the
+// core finds (the first written) and a write names (Folder). Both are relative to
+// the binding's key prefix and follow docs/TOKEN.md's path rules, or are refused.
 type Item struct {
-	Key string
+	Key, Dir string
 }
 
 // Format maps the path segments under a binding's prefix (one or more, each
@@ -29,6 +30,12 @@ type Format interface {
 // client names; Origin says whether that URL may be the item's origin.
 type Mirror interface {
 	Origin(it Item, url string) error
+}
+
+// Folder is a format of Dir items: ObjectName says whether a write may give the
+// object in it that name.
+type Folder interface {
+	ObjectName(it Item, name string) error
 }
 
 var (

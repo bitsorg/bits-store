@@ -156,10 +156,7 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 		return failMsg(w, http.StatusBadRequest, "bad-request")
 	}
 	src := q.Get("url")
-	item := format.Item{Key: strings.TrimPrefix(key, b.KeyPrefix+"/")}
-	if b.KeyPrefix == "" {
-		item.Key = key
-	}
+	item := format.Item{Key: b.unprefixed(key)}
 	if err := b.mirror.Origin(item, src); err != nil {
 		return failDetail(w, http.StatusBadRequest, "bad-url", err.Error())
 	}

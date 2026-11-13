@@ -285,3 +285,58 @@ func TestS3Parts(t *testing.T) {
 		t.Logf("maxCopy %d: final ETag %s", mc, fi.ETag)
 	}
 }
+
+// TestS3Tarballs writes a build by its hash to a real S3 endpoint (as TestS3) and
+// reads it back by the hash alone; a second name under the hash is refused.
+func TestS3Tarballs(t *testing.T) {
+	ep, bucket := os.Getenv("BITS_STORE_S3IT_ENDPOINT"), os.Getenv("BITS_STORE_S3IT_BUCKET")
+	if ep == "" || bucket == "" {
+		t.Skip("BITS_STORE_S3IT_ENDPOINT and BITS_STORE_S3IT_BUCKET not set")
+	}
+	s, tok, _ := setup(t)
+	vol := VolumeConf{Endpoint: ep, Bucket: bucket, Region: "us-east-1", AllowHTTP: strings.HasPrefix(ep, "http:"),
+		AccessKeyEnv: "BITS_STORE_S3IT_ACCESS_KEY", SecretKeyEnv: "BITS_STORE_S3IT_SECRET_KEY"}
+	st, err := vol.store()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.stores["s3"] = st
+	ctx := context.Background()
+	key := tarDir + "/" + tarName
+	defer st.Remove(ctx, key)
+	defer st.Remove(ctx, tarDir+"/sub/x")
+	st.Remove(ctx, key)
+	st.Put(ctx, tarDir+"/sub/x", strings.NewReader("a sub-folder object"), 5<<20, nil)
+	auth := map[string]string{"Authorization": "Bearer " + tok}
+	if w := do(s, "GET", tarPath, auth); w.Code != 404 {
+		t.Fatalf("nothing stored: %d", w.Code)
+	}
+	data := bytes.Repeat([]byte("tarball "), 1000)
+	up := startNamed(t, s, tok, tarName, data)
+	r, _ := http.NewRequest("PUT", up.URL, bytes.NewReader(data))
+	r.Header.Set("Content-MD5", up.Headers["Content-MD5"])
+	resp, err := http.DefaultClient.Do(r)
+	if err != nil || resp.StatusCode != 200 {
+		t.Fatalf("upload: %v %v", resp, err)
+	}
+	resp.Body.Close()
+	if w := post(s, tarPath+"?complete="+up.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("complete: %d %s", w.Code, w.Body)
+	}
+	w := do(s, "GET", tarPath, auth)
+	if w.Code != 302 || w.Header().Get("Bits-Object-Name") != tarName {
+		t.Fatalf("by hash: %d %v", w.Code, w.Header())
+	}
+	resp, err = http.Get(w.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Equal(got, data) {
+		t.Fatalf("read back %d bytes", len(got))
+	}
+	if w := post(s, tarPath+"?uploads", tok, named("ROOT-6.32.02-2.x86_64-el9.tar.gz", data)); w.Code != 409 {
+		t.Fatalf("a second name: %d", w.Code)
+	}
+}

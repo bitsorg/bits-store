@@ -18,6 +18,7 @@
            "trusted": ["cern.ch", "github.com", "gitlab.com", "gnu.org", "pypi.org", "pythonhosted.org"]},
  "bindings": [
   {"prefix": "/manifests", "volume": "cern-s3-public", "key_prefix": "MANIFESTS", "public": true},
+  {"prefix": "/store/lhcb", "volume": "cern-s3", "key_prefix": "TARS", "format": "tarballs"},
   {"prefix": "/sources/archives", "volume": "cern-s3", "key_prefix": "SOURCES/cache", "format": "sources",
    "public": true, "max_size": 34359738368}
  ]

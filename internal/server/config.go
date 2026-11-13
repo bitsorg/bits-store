@@ -72,9 +72,18 @@ type Binding struct {
 	segs      []string
 	format    format.Format
 	mirror    format.Mirror // the format, when it fetches what is missing
+	folder    format.Folder // the format, when its items are folders holding one object
 }
 
 const defaultMaxSize = 32 << 30
+
+// unprefixed is a key or folder relative to the binding's key prefix, as its format names it.
+func (b *Binding) unprefixed(k string) string {
+	if b.KeyPrefix == "" {
+		return k
+	}
+	return strings.TrimPrefix(k, b.KeyPrefix+"/")
+}
 
 // LoadConfig reads and checks a configuration file.
 func LoadConfig(path string) (*Config, error) {
@@ -175,6 +184,7 @@ func (c *Config) bindings() ([]Binding, error) {
 				strings.Join(format.Names(), ", "))
 		}
 		b.mirror, _ = b.format.(format.Mirror)
+		b.folder, _ = b.format.(format.Folder)
 		switch {
 		case b.mirror == nil && b.MaxSize != 0:
 			return nil, fmt.Errorf("binding %q: max_size is for formats that fetch", b.Prefix)

@@ -28,11 +28,22 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   reason), remembered for 10 minutes or until a reload. Clients percent-encode the
   URL (a raw `+` reads as a space). The binding's `max_size` bounds a fetch (bytes,
   default 32 GiB).
+- `tarballs` is bits' package store: `<arch>/<hash>` names the build of that hash,
+  kept as bits writes it (key prefix `TARS`: `<arch>/store/<hash[:2]>/<hash>/<pkg>-
+  <version>[-<revision>].<arch>.tar.gz`). `GET` or `HEAD <prefix>/<arch>/<hash>`
+  redirects to it, its file name in `Bits-Object-Name` (bits-store's `404` if none; of
+  several, in old stores, the lowest name). An upload of a hash names its file in the
+  start (`"name"`, of the path's architecture); it answers `409 exists` when the hash
+  holds a file under any name, which a `HEAD` then names. bits-store finds the file by
+  listing that hash's folder (the volume's keys need `s3:ListBucket`), the index later;
+  reads remember a hit for 10 minutes, a miss for 30 seconds. Writers with keys of their
+  own can still add a second file under a hash.
 - A `public` sources binding reads without a token, by plain URLs (make its key prefix
-  public-read; the volume needs keys, to write): a miss is the bucket's `404`, and bits
+  public-read; the volume needs keys, to write). A miss is the bucket's `404`, and bits
   then downloads from the URL itself. Only a token with GET on the path fetches; any
   other token reads as anyone does, a bad one gets `401`. What a fetch brings is then
-  public, from `site_hosts` too.
+  public, from `site_hosts` too. A public `tarballs` binding likewise reads by plain
+  URLs, its volume's keys listing for it.
 - Where a fetch may go (`fetch` in the configuration): http(s) only, no proxy; never
   loopback, link-local or the host's own addresses; the site network (private
   addresses and `site_ranges`) only for the hosts in `site_hosts`; anywhere public

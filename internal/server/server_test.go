@@ -91,6 +91,8 @@ func setup(t *testing.T) (s *Server, good string, now time.Time) {
 			{Prefix: "/store/lhcb/x86_64-el10-src", Volume: "s3", KeyPrefix: "SRC", Format: "sources", MaxSize: 1000},
 			{Prefix: "/store/lhcb/x86_64-el10-pubsrc", Volume: "s3", KeyPrefix: "PUBSRC", Format: "sources", Public: true},
 			{Prefix: "/pubsrc", Volume: "s3", KeyPrefix: "PUBSRC2", Format: "sources", Public: true}, // beyond the token
+			{Prefix: "/store/lhcb/x86_64-el10-gcc14-opt/t", Volume: "s3", KeyPrefix: "TT", Format: "tarballs"},
+			{Prefix: "/store/lhcb/x86_64-el10-gcc14-opt/pt", Volume: "s3", KeyPrefix: "PUBT", Format: "tarballs", Public: true}, // within the PUT
 		}}
 	if s, err = New(c); err != nil {
 		t.Fatal(err)
@@ -247,6 +249,7 @@ func TestConfigRefused(t *testing.T) {
 		"unknown-format":      func(c *Config) { c.Bindings[0].Format = "nope" },
 		"max-lifetime-zero":   func(c *Config) { c.MaxLifetime = "0s" },
 		"mirror-anonymous":    func(c *Config) { c.Bindings[0].Format = "sources" },
+		"tarballs-anonymous":  func(c *Config) { c.Bindings[0].Format = "tarballs" },
 		"max-size-not-mirror": func(c *Config) { c.Bindings[0].MaxSize = 1 },
 		"access-log":          func(c *Config) { c.AccessLog = "some" },
 		"site-range":          func(c *Config) { c.Fetch.SiteRanges = []string{"10.0.0.0"} },

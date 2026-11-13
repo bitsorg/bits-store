@@ -37,16 +37,42 @@ type memStore struct {
 	etags      map[string]string         // assembled from parts: S3's ETag
 	mp         map[string]map[int][]byte // multipart uploads' parts, by upload id
 	mpKey      map[string]string         // their keys
+	listFails  bool
+	listed     int    // List calls
+	afterList  func() // runs once a listing is taken, before it is returned
+	mpSeq      int
 }
 
 func newMem() *memStore {
 	return &memStore{objs: map[string][]byte{}, meta: map[string]map[string]string{}, parted: map[string]bool{},
 		etags: map[string]string{}, mp: map[string]map[int][]byte{}, mpKey: map[string]string{}}
 }
+func (m *memStore) List(_ context.Context, prefix string) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.listed++
+	if m.listFails {
+		return nil, fmt.Errorf("list failed")
+	}
+	var out []string
+	for k := range m.objs {
+		if rest, ok := strings.CutPrefix(k, prefix); ok && !strings.Contains(rest, "/") {
+			out = append(out, k)
+		}
+	}
+	if f := m.afterList; f != nil {
+		m.afterList = nil
+		m.mu.Unlock()
+		f()
+		m.mu.Lock()
+	}
+	return out, nil
+}
 func (m *memStore) StartMultipart(_ context.Context, key string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	id := fmt.Sprintf("mp%d", len(m.mp)+1)
+	m.mpSeq++ // never re-used: an aborted id must stay gone
+	id := fmt.Sprintf("mp%d", m.mpSeq)
 	m.mp[id], m.mpKey[id] = map[int][]byte{}, key
 	return id, nil
 }
