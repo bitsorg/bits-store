@@ -23,7 +23,7 @@ func reloadConfig(t *testing.T, bindings ...Binding) (*Config, string, time.Time
 		t.Fatal(err)
 	}
 	return &Config{Issuer: v.Issuer, Audience: v.Audience, Keys: v.Keys,
-		Volumes: map[string]VolumeConf{"s3": {Endpoint: "https://s3.example.org", Bucket: "bits",
+		Volumes: map[string]VolumeConf{"s3": {Endpoint: fakeS3(t, 200, ""), AllowHTTP: true, Bucket: "bits",
 			Region: "us-east-1", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}},
 		Bindings: bindings}, v.Cases[0].Token, time.Unix(v.Now, 0)
 }
@@ -43,7 +43,7 @@ func TestReloadTakesAGoodConfigAndKeepsTheRunningOneOverABadOne(t *testing.T) {
 	sources := Binding{Prefix: "/sources/archives", Volume: "s3", KeyPrefix: "SOURCES/cache"}
 	c, good, now := reloadConfig(t, sources)
 	writeConfig(t, path, c)
-	if err := CheckConfig(path); err != nil {
+	if err := CheckConfig(path, false); err != nil {
 		t.Fatalf("CheckConfig of a good file: %v", err)
 	}
 	r, _, err := NewReloader(path)
@@ -75,7 +75,7 @@ func TestReloadTakesAGoodConfigAndKeepsTheRunningOneOverABadOne(t *testing.T) {
 	}
 	c.Bindings = append(c.Bindings, Binding{Prefix: "/store/atlas", Volume: "nowhere"})
 	writeConfig(t, path, c)
-	if CheckConfig(path) == nil {
+	if CheckConfig(path, false) == nil {
 		t.Fatal("CheckConfig took a binding to a missing volume")
 	}
 	if ok, err := r.Check(); ok || err == nil || get() != 302 {

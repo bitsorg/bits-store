@@ -38,6 +38,7 @@ type memStore struct {
 	mp         map[string]map[int][]byte // multipart uploads' parts, by upload id
 	mpKey      map[string]string         // their keys
 	listFails  bool
+	probeErr   error // what Probe answers
 	getFails   bool
 	listed     int    // List calls
 	afterList  func() // runs once a listing is taken, before it is returned
@@ -213,6 +214,12 @@ func (m *memStore) Put(ctx context.Context, key string, r io.Reader, partSize in
 	delete(m.etags, key)
 	return nil
 }
+func (m *memStore) Probe(context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.probeErr
+}
+
 func (m *memStore) Remove(_ context.Context, key string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

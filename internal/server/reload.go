@@ -3,6 +3,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"log"
 	"net/http"
@@ -11,11 +12,16 @@ import (
 )
 
 // CheckConfig reads a configuration file and builds a Server from it, as a start
-// would: nil if the service would take it.
-func CheckConfig(path string) error {
+// would: nil if the service would take it; with probe, each volume's keys must also
+// list its bucket.
+func CheckConfig(path string, probe bool) error {
 	c, err := LoadConfig(path)
-	if err == nil {
-		_, err = New(c)
+	if err != nil {
+		return err
+	}
+	s, err := New(c)
+	if err == nil && probe {
+		err = probeErr(probeAll(context.Background(), s.stores))
 	}
 	return err
 }
@@ -41,6 +47,7 @@ func NewReloader(path string) (*Reloader, *Config, error) {
 	}
 	r := &Reloader{path: path, seen: sha256.Sum256(b)}
 	r.cur.Store(s)
+	s.failingVolumes(s.now()) // probed now, not at the first /health
 	return r, c, nil
 }
 
@@ -70,6 +77,7 @@ func (r *Reloader) Check() (bool, error) {
 	s.uploads, s.fetches, s.now = old.uploads, old.fetches, old.now
 	s.fetches.forgetFailures() // the new policy may allow what failed
 	r.cur.Store(s)
+	s.failingVolumes(s.now()) // probed now, not at the first /health
 	return true, nil
 }
 

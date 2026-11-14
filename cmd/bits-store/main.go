@@ -21,7 +21,7 @@ func main() {
 	listen := flag.String("listen", "", "address to listen on (overrides the configuration)")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	health := flag.String("health", "", "GET this /health URL, exit 0 if it answers 200 (a container's health check)")
-	check := flag.Bool("check", false, "check the configuration file and exit: 0 if the service would take it")
+	check := flag.Bool("check", false, "check the configuration file, and that each volume's keys list its bucket, and exit: 0 if the service would take it")
 	every := flag.Duration("reload-every", 5*time.Second, "how often to look for a changed configuration file; 0: never")
 	flag.Parse()
 	if *showVersion {
@@ -32,7 +32,7 @@ func main() {
 		os.Exit(checkHealth(*health))
 	}
 	if *check {
-		if err := server.CheckConfig(*config); err != nil {
+		if err := server.CheckConfig(*config, true); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}

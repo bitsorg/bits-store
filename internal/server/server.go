@@ -46,6 +46,7 @@ type Server struct {
 	fetchClient *http.Client
 	plain       map[string]objectStore // volume -> plain URLs, for public bindings
 	accessLog   string
+	health      *volumeHealth
 }
 
 // New builds a Server from a checked configuration.
@@ -75,7 +76,8 @@ func New(c *Config) (*Server, error) {
 	}
 	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
 		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{},
-		policy: pol, fetchClient: pol.client(), plain: map[string]objectStore{}, accessLog: accessLog}
+		policy: pol, fetchClient: pol.client(), plain: map[string]objectStore{}, accessLog: accessLog,
+		health: &volumeHealth{}}
 	for name, vol := range c.Volumes {
 		s.place[name] = normEndpoint(vol.Endpoint) + " " + vol.Bucket
 		s.plain[name] = plainStore{strings.TrimSuffix(vol.Endpoint, "/"), vol.Bucket}
@@ -99,7 +101,7 @@ func New(c *Config) (*Server, error) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	code, t, p := s.serve(w, r)
 	switch {
-	case p == "/health" && code == http.StatusOK, s.accessLog == "none":
+	case p == "/health", s.accessLog == "none": // a failing volume is logged by its probe
 		return
 	case s.accessLog == "errors" && code < 400 && r.Method != http.MethodPost:
 		return // hits and waits; writes and errors are logged
@@ -123,6 +125,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 	// The path exactly as sent, never Go's decoded r.URL.Path (docs/TOKEN.md).
 	p, rawQuery, _ := strings.Cut(r.RequestURI, "?")
 	if p == "/health" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		if bad := s.failingVolumes(s.now()); len(bad) > 0 { // why: in the log, not to anyone
+			http.Error(w, "volumes failing: "+strings.Join(bad, ", "), http.StatusServiceUnavailable)
+			return http.StatusServiceUnavailable, nil, p
+		}
 		fmt.Fprintln(w, "ok")
 		return http.StatusOK, nil, p
 	}

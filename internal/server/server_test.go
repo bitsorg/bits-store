@@ -103,6 +103,7 @@ func setup(t *testing.T) (s *Server, good string, now time.Time) {
 	}
 	now = time.Unix(v.Now, 0)
 	s.now = func() time.Time { return now }
+	s.health.at = now // probed: tests never reach s3.example.org
 	return s, v.Cases[0].Token, now
 }
 

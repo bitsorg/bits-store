@@ -65,6 +65,8 @@ type objectStore interface {
 	// Put streams r to key, in parts of partSize when longer; meta as Copy's.
 	Put(ctx context.Context, key string, r io.Reader, partSize int64, meta map[string]string) error
 	Remove(ctx context.Context, key string) error
+	// Probe lists one key of the bucket: the keys are taken and may list it.
+	Probe(ctx context.Context) error
 	Anonymous() bool
 }
 
@@ -216,6 +218,13 @@ func (m minioStore) List(ctx context.Context, prefix string) ([]string, error) {
 	return out, nil
 }
 
+func (m minioStore) Probe(ctx context.Context) error {
+	for o := range m.c.ListObjectsIter(ctx, m.bucket, minio.ListObjectsOptions{MaxKeys: 1}) {
+		return o.Err // one key is enough: the iterator stops here
+	}
+	return nil
+}
+
 func (m minioStore) Remove(ctx context.Context, key string) error {
 	return m.c.RemoveObject(ctx, m.bucket, key, minio.RemoveObjectOptions{})
 }
@@ -263,3 +272,4 @@ func (plainStore) Put(context.Context, string, io.Reader, int64, map[string]stri
 	return errAnonymous
 }
 func (plainStore) Remove(context.Context, string) error { return errAnonymous }
+func (plainStore) Probe(context.Context) error          { return nil }

@@ -11,7 +11,9 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   logical prefix to a volume and key prefix; GET and HEAD are redirected to presigned
   URLs (plain URLs for public bindings, which use an anonymous volume, sources aside).
 - `bits-store -check -config config.json` checks a configuration as a start would
-  (the volumes' key variables set). The running service reloads its configuration
+  (the volumes' key variables set), and that each volume with keys can list its
+  bucket: keys S3 does not take, a missing bucket or no `s3:ListBucket` are refused
+  with the volume's name. The running service reloads its configuration
   when the file changes (`-reload-every`, 5s); one that fails the checks is logged and
   the running one kept. Changed keys in the environment, or `listen`, need a restart. In a
   container, mount the configuration's directory: a mounted single file does not see
@@ -94,6 +96,10 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   the S3 keys in the environment its volumes name; for a site CA, mount it and set
   `SSL_CERT_FILE`. `bits-store -health URL` is its health check; the image checks
   port 8098, so a `listen` on another port needs the health check changed too.
+  `/health` answers `503` naming the volumes whose bucket its keys could not list at
+  the last probe (at most a minute old, never waited for; a start or reload probes at
+  once, and answers `ok` until that probe ends); why is logged, once per change, and
+  `/health` is never in the access log.
 - `go test -run TestS3 ./internal/server` runs reads and writes against a real S3
   endpoint when `BITS_STORE_S3IT_*` is set (see `internal/server/s3_test.go`).
 - Clients send paths unencoded: the allowed punctuation (`~+!@=,:`) as is, since a `%`
