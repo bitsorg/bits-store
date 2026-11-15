@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/bitsorg/bits-store/internal/index"
 )
 
 // memStore is an in-memory bucket. Its "upload" stands in for the client's PUT
@@ -41,6 +43,7 @@ type memStore struct {
 	probeErr   error // what Probe answers
 	getFails   bool
 	listed     int    // List calls
+	walked     int    // Walk calls
 	afterList  func() // runs once a listing is taken, before it is returned
 	mpSeq      int
 }
@@ -161,6 +164,27 @@ func (m *memStore) Stat(ctx context.Context, key string) (objInfo, bool, error) 
 	}
 	b, ok := m.objs[key]
 	return objInfo{int64(len(b)), m.etag(key), m.meta[key]}, ok, nil
+}
+
+// Walk lists a copy taken first, so fn may write; listFails fails it after one object.
+func (m *memStore) Walk(_ context.Context, fn func(index.Object) error) error {
+	m.mu.Lock()
+	var objs []index.Object
+	for k, b := range m.objs {
+		objs = append(objs, index.Object{Key: k, Size: int64(len(b)), ETag: m.etag(k)})
+	}
+	fails := m.listFails
+	m.walked++
+	m.mu.Unlock()
+	for i, o := range objs {
+		if fails && i == 1 {
+			return fmt.Errorf("list failed")
+		}
+		if err := fn(o); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // etag is a key's ETag, its MD5 unless written in parts; m.mu held.

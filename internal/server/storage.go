@@ -16,6 +16,8 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/minio/minio-go/v7/pkg/s3utils"
+
+	"github.com/bitsorg/bits-store/internal/index"
 )
 
 // A copy above maxCopy goes in parts of copyPart (S3's CopyObject takes up to 5 GiB).
@@ -65,6 +67,8 @@ type objectStore interface {
 	// Put streams r to key, in parts of partSize when longer; meta as Copy's.
 	Put(ctx context.Context, key string, r io.Reader, partSize int64, meta map[string]string) error
 	Remove(ctx context.Context, key string) error
+	// Walk calls fn for every object of the bucket, until fn returns an error.
+	Walk(ctx context.Context, fn func(index.Object) error) error
 	// Probe lists one key of the bucket: the keys are taken and may list it.
 	Probe(ctx context.Context) error
 	Anonymous() bool
@@ -218,6 +222,20 @@ func (m minioStore) List(ctx context.Context, prefix string) ([]string, error) {
 	return out, nil
 }
 
+func (m minioStore) Walk(ctx context.Context, fn func(index.Object) error) error {
+	ctx, cancel := context.WithCancel(ctx) // ends the listing at fn's error
+	defer cancel()
+	for o := range m.c.ListObjects(ctx, m.bucket, minio.ListObjectsOptions{Recursive: true}) {
+		if o.Err != nil {
+			return o.Err
+		}
+		if err := fn(index.Object{Key: o.Key, Size: o.Size, ETag: o.ETag, Mtime: o.LastModified}); err != nil {
+			return err
+		}
+	}
+	return ctx.Err()
+}
+
 func (m minioStore) Probe(ctx context.Context) error {
 	for o := range m.c.ListObjectsIter(ctx, m.bucket, minio.ListObjectsOptions{MaxKeys: 1}) {
 		return o.Err // one key is enough: the iterator stops here
@@ -267,7 +285,8 @@ func (plainStore) AbortMultipart(context.Context, string, string) error { return
 func (plainStore) Get(context.Context, string, int64) ([]byte, bool, error) {
 	return nil, false, errAnonymous
 }
-func (plainStore) List(context.Context, string) ([]string, error) { return nil, errAnonymous }
+func (plainStore) List(context.Context, string) ([]string, error)       { return nil, errAnonymous }
+func (plainStore) Walk(context.Context, func(index.Object) error) error { return errAnonymous }
 func (plainStore) Put(context.Context, string, io.Reader, int64, map[string]string) error {
 	return errAnonymous
 }

@@ -9,8 +9,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/bitsorg/bits-store/internal/index"
 	"github.com/bitsorg/bits-store/internal/server"
 )
 
@@ -23,6 +25,7 @@ func main() {
 	health := flag.String("health", "", "GET this /health URL, exit 0 if it answers 200 (a container's health check)")
 	check := flag.Bool("check", false, "check the configuration file, and that each volume's keys list its bucket, and exit: 0 if the service would take it")
 	every := flag.Duration("reload-every", 5*time.Second, "how often to look for a changed configuration file; 0: never")
+	data := flag.String("data", "", "directory for the index (index.db); none: no index")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
@@ -42,6 +45,14 @@ func main() {
 	h, cfg, err := server.NewReloader(*config)
 	if err != nil {
 		log.Fatal(err)
+	}
+	if *data != "" {
+		x, err := index.Open(filepath.Join(*data, "index.db"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		h.UseIndex(x)
+		go h.Verify()
 	}
 	if *every > 0 {
 		go h.Watch(*every)

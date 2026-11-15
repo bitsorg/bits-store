@@ -8,11 +8,14 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath \
-      -ldflags "-s -w -X main.version=${VERSION}" -o /bits-store ./cmd/bits-store
+      -ldflags "-s -w -X main.version=${VERSION}" -o /bits-store ./cmd/bits-store && \
+    mkdir -p /data
 
 FROM scratch
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /bits-store /bits-store
+# the index's directory (-data), the user's: a new named volume takes its owner
+COPY --from=build --chown=65532:65532 /data /var/lib/bits-store
 USER 65532:65532
 EXPOSE 8098
 HEALTHCHECK --interval=30s --timeout=5s CMD ["/bits-store", "-health", "http://127.0.0.1:8098/health"]

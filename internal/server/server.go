@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bitsorg/bits-store/internal/index"
 	"github.com/bitsorg/bits-store/internal/token"
 )
 
@@ -47,6 +48,8 @@ type Server struct {
 	plain       map[string]objectStore // volume -> plain URLs, for public bindings
 	accessLog   string
 	health      *volumeHealth
+	index       *index.Index  // nil: none (no -data)
+	verifyEvery time.Duration // how often a bucket is listed against the index
 }
 
 // New builds a Server from a checked configuration.
@@ -74,10 +77,14 @@ func New(c *Config) (*Server, error) {
 	if err != nil || life < minURLExpiry || life > time.Hour {
 		return nil, fmt.Errorf("url_lifetime: between 1s and 1h")
 	}
+	every, err := duration(c.IndexVerify, 24*time.Hour)
+	if err != nil || every < time.Hour {
+		return nil, fmt.Errorf("index_verify: at least 1h")
+	}
 	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
 		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{},
 		policy: pol, fetchClient: pol.client(), plain: map[string]objectStore{}, accessLog: accessLog,
-		health: &volumeHealth{}}
+		health: &volumeHealth{}, verifyEvery: every}
 	for name, vol := range c.Volumes {
 		s.place[name] = normEndpoint(vol.Endpoint) + " " + vol.Bucket
 		s.plain[name] = plainStore{strings.TrimSuffix(vol.Endpoint, "/"), vol.Bucket}

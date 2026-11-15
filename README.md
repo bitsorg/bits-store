@@ -67,6 +67,14 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   default 100 fetches); a spent one answers `429` until midnight UTC. 16 fetches at
   once, 4 per subject; each buffers one part (16 MiB at the default `max_size`).
   Every fetch is logged with its asker, bytes and time.
+- The index (`-data <dir>`, its `index.db`; none: no index): what each bucket of a
+  volume with keys holds, `STAGING/` aside: key, size, ETag, time, and the declared
+  SHA-256 of what the service wrote. Each promote adds its object. Each bucket is
+  listed against it when never listed, then every `index_verify` (default `24h`, at
+  least `1h`), one at a time, a failed listing again after 10 minutes: what changed
+  outside the service is repaired and logged as `missing`, `changed` and `extra`. It
+  is a cache: losing it costs one listing, and a write it fails to record still
+  succeeds. One instance only.
 - `access_log`: `errors` (the default) logs errors and writes, not hits; `all` every
   request; `none` no request lines. Fetches and failures are logged in any case.
 - Writes go through staging; a client never gets a URL for a final key:
@@ -92,8 +100,10 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   aborting incomplete multipart uploads after a day.
 - Container: `make image` builds `bits-store:<version>`, the static binary alone in an
   empty image, as user 65532, listening on 8098 (the default when the configuration
-  sets no `listen`). Mount the configuration at `/etc/bits-store/config.json` and give
-  the S3 keys in the environment its volumes name; for a site CA, mount it and set
+  sets no `listen`). The index's directory, `/var/lib/bits-store`, is that user's: a
+  new Docker named volume there takes its owner (`-data /var/lib/bits-store`). Mount
+  the configuration at `/etc/bits-store/config.json` and give the S3 keys in the
+  environment its volumes name; for a site CA, mount it and set
   `SSL_CERT_FILE`. `bits-store -health URL` is its health check; the image checks
   port 8098, so a `listen` on another port needs the health check changed too.
   `/health` answers `503` naming the volumes whose bucket its keys could not list at

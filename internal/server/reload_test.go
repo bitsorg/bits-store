@@ -52,6 +52,7 @@ func TestReloadTakesAGoodConfigAndKeepsTheRunningOneOverABadOne(t *testing.T) {
 	}
 	s := r.cur.Load()
 	s.now = func() time.Time { return now }
+	r.UseIndex(withIndex(t, s))
 	get := func() int {
 		w := do(r.cur.Load(), "GET", "/store/lhcb/x86_64-el10-gcc14-opt/ab/h",
 			map[string]string{"Authorization": "Bearer " + good})
@@ -67,8 +68,8 @@ func TestReloadTakesAGoodConfigAndKeepsTheRunningOneOverABadOne(t *testing.T) {
 	if ok, err := r.Check(); !ok || err != nil || get() != 302 {
 		t.Fatalf("new binding: reloaded %v, %v; GET %d, want 302", ok, err, get())
 	}
-	if r.cur.Load().uploads != s.uploads || r.cur.Load().fetches != s.fetches {
-		t.Fatal("pending uploads or fetches did not carry over")
+	if r.cur.Load().uploads != s.uploads || r.cur.Load().fetches != s.fetches || r.cur.Load().index != s.index {
+		t.Fatal("pending uploads, fetches or the index did not carry over")
 	}
 	if s.fetches.m["failed"] != nil || s.fetches.m["running"] != running {
 		t.Fatal("remembered failures kept, or a running fetch dropped")

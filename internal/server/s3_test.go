@@ -16,8 +16,11 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/minio/minio-go/v7"
+
+	"github.com/bitsorg/bits-store/internal/index"
 )
 
 // TestS3 runs reads and writes against a real S3 endpoint, skipped unless
@@ -379,5 +382,54 @@ func TestS3Revisions(t *testing.T) {
 	}
 	if _, ok, err := st.Get(ctx, dir+"v1.3-9", 10); ok || err != nil {
 		t.Fatalf("a missing marker: %v %v", ok, err)
+	}
+}
+
+// TestS3Index lists a real bucket against the index, as TestS3 (its variables):
+// objects written and removed outside the service are found by the next verify.
+func TestS3Index(t *testing.T) {
+	ep, bucket := os.Getenv("BITS_STORE_S3IT_ENDPOINT"), os.Getenv("BITS_STORE_S3IT_BUCKET")
+	if ep == "" || bucket == "" {
+		t.Skip("BITS_STORE_S3IT_ENDPOINT and BITS_STORE_S3IT_BUCKET not set")
+	}
+	s, _, now := setup(t)
+	vol := VolumeConf{Endpoint: ep, Bucket: bucket, Region: "us-east-1", AllowHTTP: strings.HasPrefix(ep, "http:"),
+		AccessKeyEnv: "BITS_STORE_S3IT_ACCESS_KEY", SecretKeyEnv: "BITS_STORE_S3IT_SECRET_KEY"}
+	st, err := vol.store()
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.stores, s.place = map[string]objectStore{"s3": st}, map[string]string{"s3": "it " + bucket}
+	x := withIndex(t, s)
+	ctx := context.Background()
+	clock := now
+	s.now = func() time.Time { return clock }
+	verify := func() index.Drift {
+		s.verifyDue(ctx, map[string]time.Time{})
+		_, d, ok, err := x.Verified(ctx, "it "+bucket)
+		if !ok || err != nil {
+			t.Fatalf("not verified: %v", err)
+		}
+		clock = clock.Add(s.verifyEvery)
+		return d
+	}
+	verify() // whatever the bucket holds
+	a, b := "IDX-s3it/a", "IDX-s3it/deep/er/b"
+	for _, k := range []string{a, b} {
+		if err := st.Put(ctx, k, strings.NewReader("index "+k), 0, nil); err != nil {
+			t.Fatal(err)
+		}
+		defer st.Remove(ctx, k)
+	}
+	if d := verify(); d != (index.Drift{Missing: 2}) {
+		t.Fatalf("two objects put outside: %+v", d)
+	}
+	o, ok := indexed(t, s, "s3", b)
+	if fi, _, _ := st.Stat(ctx, b); !ok || o.Size != fi.Size || o.ETag != fi.ETag {
+		t.Fatalf("indexed %+v, the bucket says %+v", o, fi)
+	}
+	st.Remove(ctx, a)
+	if d := verify(); d != (index.Drift{Extra: 1}) {
+		t.Fatalf("one object removed outside: %+v", d)
 	}
 }

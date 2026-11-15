@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bitsorg/bits-store/internal/format"
+	"github.com/bitsorg/bits-store/internal/index"
 	"github.com/bitsorg/bits-store/internal/token"
 )
 
@@ -263,8 +264,14 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 	staged := func(i objInfo) bool { return i.Size == u.size && i.ETag == u.md5Hex || u.fetched && marked(i) }
 	// a copy of an object in parts may get a new ETag: ours by its marker too
 	ours := func(i objInfo) bool { return staged(i) || (u.size > maxCopy || u.uploadID != "") && marked(i) }
-	done := func() (int, string) {
+	done := func(fi objInfo) (int, string) {
 		s.uploads.markDone(id) // first: a retry must not look for the staged object
+		if s.index != nil {
+			o := index.Object{Key: u.key, Size: fi.Size, ETag: fi.ETag, Mtime: now, SHA256: u.sha256}
+			if err := s.index.Put(ctx, place, o, s.now()); err != nil {
+				log.Printf("index %s: %v", u.key, err) // a verify adds it
+			}
+		}
 		if u.dir != "" {
 			s.found.stored(s, u.volume, u.dir, u.key, now)
 		}
@@ -283,7 +290,7 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 	if fi, exists, err := st.Stat(ctx, u.key); err != nil {
 		return http.StatusBadGateway, ""
 	} else if exists && ours(fi) {
-		return done() // an earlier complete landed, and its answer was lost
+		return done(fi) // an earlier complete landed, and its answer was lost
 	} else if exists {
 		return drop(http.StatusConflict, "exists") // first writer wins
 	}
@@ -334,7 +341,7 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 		log.Printf("promote %s: another object appeared during the copy; left alone", u.key)
 		return drop(http.StatusConflict, "exists")
 	}
-	return done()
+	return done(fi)
 }
 
 func promoted(w http.ResponseWriter, u *upload) int {

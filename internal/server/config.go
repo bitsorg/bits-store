@@ -30,7 +30,8 @@ type Config struct {
 	Volumes     map[string]VolumeConf `json:"volumes"`
 	Bindings    []Binding             `json:"bindings"`
 	Fetch       FetchConf             `json:"fetch"`
-	AccessLog   string                `json:"access_log"` // all, errors (default: and writes) or none
+	AccessLog   string                `json:"access_log"`   // all, errors (default: and writes) or none
+	IndexVerify string                `json:"index_verify"` // a bucket listed against the index; empty: 24h
 }
 
 // FetchConf says where fetches may go (fetch.go). Site addresses (private ones and
