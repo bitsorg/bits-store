@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -151,3 +152,9 @@ func TestIndexVerifyConfig(t *testing.T) {
 		}
 	}
 }
+
+func indexObject(key string, size int64) index.Object {
+	return index.Object{Key: key, Size: size, ETag: "e"}
+}
+
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }

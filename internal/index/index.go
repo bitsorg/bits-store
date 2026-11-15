@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS objects (
   mtime   INTEGER NOT NULL,  -- ms
   sha256  TEXT,
   seen    INTEGER NOT NULL,  -- ms: written by us, or the start of the listing that saw it
-  PRIMARY KEY (bucket, key));
+  PRIMARY KEY (bucket, key)) WITHOUT ROWID;  -- a range of keys reads its rows in place
 CREATE TABLE IF NOT EXISTS verified (
   bucket  TEXT PRIMARY KEY,
   at      INTEGER NOT NULL,  -- ms, the start of the listing
@@ -97,6 +97,43 @@ func (x *Index) Get(ctx context.Context, bucket, key string) (o Object, ok bool,
 	}
 	o.Key, o.Mtime, o.SHA256 = key, time.UnixMilli(mtime), sha.String
 	return o, err == nil, err
+}
+
+// Count is a number of objects and their bytes.
+type Count struct{ Objects, Bytes int64 }
+
+// Total is all of a bucket's objects.
+func (x *Index) Total(ctx context.Context, bucket string) (c Count, err error) {
+	err = x.db.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(size), 0) FROM objects WHERE bucket = ?`,
+		bucket).Scan(&c.Objects, &c.Bytes)
+	return c, err
+}
+
+// Under groups a bucket's objects under prefix (a folder without its "/"; "": the
+// bucket) by the next segment of their keys: under a tarballs prefix, the architecture.
+func (x *Index) Under(ctx context.Context, bucket, prefix string) (map[string]Count, error) {
+	q, args := "bucket = ?", []any{1, bucket}
+	if prefix != "" { // the folder's keys: '0' follows '/'
+		q, args = "bucket = ? AND key >= ? AND key < ?", []any{len(prefix) + 2, bucket, prefix + "/", prefix + "0"}
+	}
+	rows, err := x.db.QueryContext(ctx, `SELECT seg, count(*), sum(size) FROM (
+		SELECT CASE instr(rest, '/') WHEN 0 THEN rest ELSE substr(rest, 1, instr(rest, '/') - 1) END AS seg, size
+		FROM (SELECT substr(key, ?) AS rest, size FROM objects WHERE `+q+`))
+		WHERE seg != '' GROUP BY seg`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]Count{}
+	for rows.Next() {
+		var seg string
+		var c Count
+		if err := rows.Scan(&seg, &c.Objects, &c.Bytes); err != nil {
+			return nil, err
+		}
+		out[seg] = c
+	}
+	return out, rows.Err()
 }
 
 // Verified returns when the bucket was last verified, and what was found; ok

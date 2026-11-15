@@ -75,6 +75,14 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   outside the service is repaired and logged as `missing`, `changed` and `extra`. It
   is a cache: losing it costs one listing, and a write it fails to record still
   succeeds. One instance only.
+- `/metrics` (with the index; Prometheus text, no token: block it in front, for the
+  site's scraper only): for each bucket listed at least once, named by its first
+  volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first
+  segment under each `tarballs` binding's key prefix), `bits_store_objects_total`,
+  `bits_store_bytes_total`, what its last listing found (`bits_store_index_drift`,
+  `kind` missing, changed or extra) and when it began
+  (`bits_store_index_verified_seconds`); `bits_store_index_errors_total`, the writes
+  the index failed to record. Scrapes within a minute share one answer.
 - `access_log`: `errors` (the default) logs errors and writes, not hits; `all` every
   request; `none` no request lines. Fetches and failures are logged in any case.
 - Writes go through staging; a client never gets a URL for a final key:

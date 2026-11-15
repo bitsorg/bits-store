@@ -48,6 +48,7 @@ type Server struct {
 	plain       map[string]objectStore // volume -> plain URLs, for public bindings
 	accessLog   string
 	health      *volumeHealth
+	scrape      metricsCache
 	index       *index.Index  // nil: none (no -data)
 	verifyEvery time.Duration // how often a bucket is listed against the index
 }
@@ -108,7 +109,7 @@ func New(c *Config) (*Server, error) {
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	code, t, p := s.serve(w, r)
 	switch {
-	case p == "/health", s.accessLog == "none": // a failing volume is logged by its probe
+	case p == "/health", p == "/metrics" && code == http.StatusOK, s.accessLog == "none": // a failing volume is logged by its probe
 		return
 	case s.accessLog == "errors" && code < 400 && r.Method != http.MethodPost:
 		return // hits and waits; writes and errors are logged
@@ -138,6 +139,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		}
 		fmt.Fprintln(w, "ok")
 		return http.StatusOK, nil, p
+	}
+	if p == "/metrics" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+		return s.metrics(w, r), nil, p // no token: for the site's own scraper, not the outside
 	}
 	write := r.Method == http.MethodPost
 	if r.Method != http.MethodGet && r.Method != http.MethodHead && !write {
