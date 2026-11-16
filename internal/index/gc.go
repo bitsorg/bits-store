@@ -44,12 +44,13 @@ func (x *Index) Unread(ctx context.Context, bucket string) (n int, err error) {
 }
 
 // Strays lists the bucket's common-manifest-*.json objects not read as common
-// manifests (outside the manifests bindings, or of another kind).
+// manifests (outside the manifests bindings, or of another kind): a collection
+// reads them itself, for their roots.
 func (x *Index) Strays(ctx context.Context, bucket string) ([]string, error) {
 	rows, err := x.db.QueryContext(ctx, `SELECT o.key FROM objects o
 		LEFT JOIN manifests m ON m.bucket = o.bucket AND m.key = o.key
 		WHERE o.bucket = ? AND o.key GLOB '*common-manifest-*.json' AND (m.kind IS NULL OR m.kind != ?)
-		ORDER BY o.key LIMIT 10`, bucket, KindCommon)
+		ORDER BY o.key`, bucket, KindCommon)
 	if err != nil {
 		return nil, err
 	}

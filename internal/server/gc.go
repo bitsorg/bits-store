@@ -3,12 +3,14 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -84,6 +86,12 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 		if err != nil {
 			return nil, err
 		}
+		if p.Refused, err = s.strayRoots(ctx, bucket, p.Volume, roots); err != nil || p.Refused != "" {
+			if err != nil {
+				return nil, err
+			}
+			continue
+		}
 		arches := map[string]*GCArch{}
 		for _, prefix := range slices.Compact(slices.Sorted(slices.Values(tars[bucket]))) {
 			skip := len(prefix) + 1
@@ -148,10 +156,6 @@ func (s *Server) gcRefused(ctx context.Context, bucket, volume string, mans []st
 	}
 	if n, err := s.index.Unread(ctx, bucket); err != nil || n > 0 {
 		return fmt.Sprintf("%d manifests could not be read, or not all of their packages", n), err
-	}
-	if strays, err := s.index.Strays(ctx, bucket); err != nil || len(strays) > 0 {
-		return fmt.Sprintf("common manifests outside the manifests bindings, or not read as such: %s",
-			strings.Join(strays, ", ")), err
 	}
 	for _, p := range mans {
 		todo, err := s.index.ManifestsToRead(ctx, bucket, p, keys, s.now(), 1)
@@ -258,4 +262,44 @@ func bytesOf(n int64) string {
 		f, unit = f/1024, unit+1
 	}
 	return fmt.Sprintf("%.1f %s", f, []string{"B", "KiB", "MiB", "GiB", "TiB"}[unit])
+}
+
+// strayRoots adds to roots what the bucket's common manifests outside its manifests
+// bindings list (the orchestrator's CANARY/ ones, say), read now: "" when it did,
+// else why a collection may not go on.
+func (s *Server) strayRoots(ctx context.Context, bucket, volume string, roots map[string]bool) (string, error) {
+	strays, err := s.index.Strays(ctx, bucket)
+	if err != nil {
+		return "", err
+	}
+	known, folders := map[string]bool{}, map[string]bool{}
+	for _, k := range strays {
+		known[k] = true
+		folders[strings.TrimSuffix(k, path.Base(k))] = true
+	}
+	for f := range folders { // their folders now: none new since the listing
+		names, err := s.stores[volume].List(ctx, f+"common-manifest-")
+		if err != nil {
+			return fmt.Sprintf("%s could not be listed: %v", f, err), nil
+		}
+		for _, n := range names {
+			if strings.HasSuffix(n, ".json") && !known[n] {
+				return n + " is new since the last listing", nil
+			}
+		}
+	}
+	for _, k := range strays {
+		body, ok, err := s.stores[volume].Get(ctx, k, maxManifest)
+		if err != nil || !ok {
+			return fmt.Sprintf("%s could not be read: %v", k, cmp.Or(err, errGone)), nil
+		}
+		m := index.Parse(k, "", body)
+		if m.Kind != index.KindCommon || m.Skipped > 0 {
+			return k + " is not a common manifest, or not all of its packages could be read", nil
+		}
+		for _, e := range m.Entries {
+			roots[e.Hash] = true
+		}
+	}
+	return "", nil
 }

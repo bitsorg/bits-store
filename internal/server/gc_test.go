@@ -157,10 +157,10 @@ func TestGCRootsAreWide(t *testing.T) {
 	}
 }
 
-func TestGCRefusesSkippedPackagesAndStrays(t *testing.T) {
+func TestGCRefusesSkippedPackagesAndOddStrays(t *testing.T) {
 	for name, objs := range map[string]map[string]string{
 		"a package without a hash":           {"MM/release_x-1/a.el9.json": `{"build_id": "release_x-1", "packages": [{"hash": 7}]}`},
-		"a common manifest no binding reads": {"TT/common-manifest-el9.json": `{"kind": "common-manifest", "sources": [], "packages": []}`},
+		"a stray that is no common manifest": {"CANARY/common-manifest-el9.json": `{"kind": "other", "packages": []}`},
 	} {
 		s, m, _, plan := gcSetup(t)
 		for k, v := range objs {
@@ -214,5 +214,48 @@ func TestGCCommand(t *testing.T) {
 	var out strings.Builder
 	if code := GC(cfg, dir, ok, &out); code != 0 || !strings.Contains(out.String(), "nothing to plan") {
 		t.Fatalf("exit %d: %s", code, out.String())
+	}
+}
+
+// Common manifests outside the manifests bindings (the orchestrator's CANARY/ ones)
+// are read at plan time: what they list stays; one that cannot be read refuses.
+func TestGCStrayRoots(t *testing.T) {
+	s, m, _, plan := gcSetup(t)
+	m.objs["CANARY/common-manifest-el9.json"] = []byte(`{"kind": "common-manifest", "sources": [], "packages": [{"hash": "bb22"}]}`)
+	now := s.now()
+	s.now = func() time.Time { return now.Add(s.verifyEvery) }
+	s.verifyDue(context.Background(), map[string]time.Time{})
+	s.readManifests(context.Background())
+	p := plan()
+	if p.Refused != "" {
+		t.Fatal(p.Refused)
+	}
+	for _, a := range p.Arches {
+		if a.Arch == "el9" && a.Sweep != 0 {
+			t.Fatalf("what a stray lists swept: %+v", a)
+		}
+	}
+	m.getFailsOn = "CANARY/common-manifest-el9.json"
+	if p := plan(); !strings.Contains(p.Refused, "could not be read") {
+		t.Fatalf("an unreadable stray: %q", p.Refused)
+	}
+	m.getFailsOn = ""
+	m.objs["CANARY/common-manifest-el10.json"] = []byte(`{"kind": "common-manifest", "sources": [], "packages": []}`)
+	if p := plan(); !strings.Contains(p.Refused, "new since the last listing") {
+		t.Fatalf("a stray written since the listing: %q", p.Refused)
+	}
+	now = s.now()
+	s.now = func() time.Time { return now.Add(s.verifyEvery) }
+	s.verifyDue(context.Background(), map[string]time.Time{})
+	if p := plan(); p.Refused != "" { // two strays, both read
+		t.Fatalf("two strays: %q", p.Refused)
+	}
+	delete(m.objs, "CANARY/common-manifest-el10.json")
+	if p := plan(); !strings.Contains(p.Refused, "could not be read") {
+		t.Fatalf("a stray gone since the listing: %q", p.Refused)
+	}
+	m.objs["CANARY/common-manifest-el10.json"] = []byte(`{"kind": "common-manifest", "sources": [], "packages": [{"hash": 5}]}`)
+	if p := plan(); !strings.Contains(p.Refused, "not all of its packages") {
+		t.Fatalf("a stray with packages skipped: %q", p.Refused)
 	}
 }
