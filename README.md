@@ -48,6 +48,15 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   (`{"sft": ["lhcb", "atlas"]}`, by name); else `404`. Groups are plain names
   (`[a-z0-9][a-z0-9._-]*`, up to 64). Builds not under a group are not read: a gate
   starts on an empty prefix. The collection plan leaves these builds alone.
+  Each is signed when its upload starts, by a security-proxy sign route
+  (`restricted_signer`: `agent_socket`, `route`, `host`, `prefix`, found as
+  bits-console finds its own; required with a gate), its key never on this host:
+  over `bits-restricted-build v1\n` and `{"arch","group","hash","name","sha256"}`
+  (canonical JSON, the declared sha256 in hex), kept in its metadata
+  `bits-signature` (`<key id>:<base64 signature>`); no signature, no upload (`503
+  unsigned`). A read names the group whose build it is in `Bits-Object-Group`
+  (its folder, not its metadata): bits reuses the build only when the signature
+  verifies over these and the bytes it downloaded; one without, from before, never.
 - `manifests` is bits' `MANIFESTS` area: the path is the key, as `blob` (the signed
   common manifests), and `GET <prefix>/rev-index/<arch>/<pkg>/<version>?revisions`
   answers `{revision: hash}` from that version's revision markers

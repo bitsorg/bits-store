@@ -4,6 +4,10 @@ package server
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
@@ -18,16 +22,18 @@ func TestGateConfig(t *testing.T) {
 	for name, ok := range map[string]bool{"group tarballs": true, " blob": true, "group blob": false,
 		"user tarballs": false, "group tarballs public": false, "group tarballs elsewhere": false,
 		"group tarballs readers": true, " tarballs readers": false, "group tarballs readers-bad": false,
-		"group tarballs readers-of-bad": false, "group tarballs shared": false} {
+		"group tarballs readers-of-bad": false, "group tarballs shared": false, "group tarballs unsigned": false,
+		" tarballs unsigned": true} {
 		f := strings.Split(name, " ")
 		keyed := VolumeConf{Endpoint: "https://s3.example.org", Bucket: "bucket", Region: "r",
 			AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}
 		alias := keyed
 		alias.Endpoint = "https://alias.example.org"
 		c := &Config{Issuer: "i", Audience: "a",
-			Keys:     map[string]KeyConfig{"k": {X: strings.Repeat("A", 43), Signer: "user"}},
-			Volumes:  map[string]VolumeConf{"k": keyed, "alias": alias},
-			Bindings: []Binding{{Prefix: "/r", Volume: "k", KeyPrefix: "R", Format: f[1], Gate: f[0], Public: len(f) > 2 && f[2] == "public"}}}
+			Keys:             map[string]KeyConfig{"k": {X: strings.Repeat("A", 43), Signer: "user"}},
+			Volumes:          map[string]VolumeConf{"k": keyed, "alias": alias},
+			Bindings:         []Binding{{Prefix: "/r", Volume: "k", KeyPrefix: "R", Format: f[1], Gate: f[0], Public: len(f) > 2 && f[2] == "public"}},
+			RestrictedSigner: SignerConf{AgentSocket: "/run/agent.sock", Route: "r", Host: "signer", Prefix: "/sign/r"}}
 		switch {
 		case len(f) < 3:
 		case f[2] == "readers":
@@ -36,6 +42,8 @@ func TestGateConfig(t *testing.T) {
 			c.Bindings[0].Readers = map[string][]string{"sft": {"LHCb"}}
 		case f[2] == "readers-of-bad":
 			c.Bindings[0].Readers = map[string][]string{"../x": {"cms"}}
+		case f[2] == "unsigned":
+			c.RestrictedSigner = SignerConf{}
 		case f[2] == "shared": // the same bucket, not gated
 			c.Bindings = append(c.Bindings, Binding{Prefix: "/o", Volume: "k", KeyPrefix: "O"})
 		case f[2] == "elsewhere": // the same bucket by another endpoint, not gated
@@ -47,12 +55,17 @@ func TestGateConfig(t *testing.T) {
 	}
 }
 
-// gated makes the tarballs binding .../t gated (key prefix TT); the vectors' token is lhcb's.
+// gated makes the tarballs binding .../t gated (key prefix TT), its builds signed
+// by a stand-in proxy; the vectors' token is lhcb's.
 func gated(t *testing.T) (*Server, *memStore, string) {
 	s, tok, _ := setup(t)
 	m := newMem()
 	s.stores["s3"] = m
 	gate(s).Gate = "group"
+	var err error
+	if s.signer, err = newSigner(newStandIn(t).conf); err != nil {
+		t.Fatal(err)
+	}
 	return s, m, tok
 }
 
@@ -92,8 +105,9 @@ func TestTheGateReads(t *testing.T) {
 		}
 		for _, method := range []string{"GET", "HEAD"} {
 			w := do(s, method, tarPath, map[string]string{"Authorization": "Bearer " + tok})
-			if c.from == "" && (w.Code != 404 || w.Header().Get("Bits-Object-Name") != "") ||
-				c.from != "" && (w.Code != 302 || !strings.Contains(w.Header().Get("Location"), "/"+filed(c.from)+"?")) {
+			if c.from == "" && (w.Code != 404 || w.Header().Get("Bits-Object-Name") != "" || w.Header().Get("Bits-Object-Group") != "") ||
+				c.from != "" && (w.Code != 302 || !strings.Contains(w.Header().Get("Location"), "/"+filed(c.from)+"?") ||
+					w.Header().Get("Bits-Object-Group") != c.from) {
 				t.Fatalf("%s %s: %d %v", name, method, w.Code, w.Header())
 			}
 		}
@@ -185,5 +199,42 @@ func TestGCLeavesTheGate(t *testing.T) {
 	s.verifyDue(context.Background(), map[string]time.Time{})
 	if p := plan(); len(p.Arches) != 0 {
 		t.Fatalf("%+v", p.Arches[0])
+	}
+}
+
+// Each build stored behind a gate carries its signature: of its architecture, hash,
+// group, name and declared sha256. Unsigned, nothing is stored.
+func TestTheGateSignsItsBuilds(t *testing.T) {
+	s, m, tok := gated(t)
+	g := newStandIn(t)
+	s.signer, _ = newSigner(g.conf)
+	data := []byte("tarball")
+	g.fail.Store(true)
+	if w := post(s, tarPath+"?uploads", tok, named(tarName, data)); w.Code != 503 || !strings.Contains(w.Body.String(), "unsigned") {
+		t.Fatalf("unsigned: %d %s", w.Code, w.Body)
+	}
+	if n := len(s.uploads.m); n != 0 {
+		t.Fatalf("an unsigned upload kept: %d", n)
+	}
+	g.fail.Store(false)
+	st := startNamed(t, s, tok, tarName, data)
+	m.upload("STAGING/"+st.ID, data)
+	if w := post(s, tarPath+"?complete="+st.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("complete: %d %s", w.Code, w.Body)
+	}
+	kid, sig64, _ := strings.Cut(m.meta[filed("lhcb")]["bits-signature"], ":")
+	sig, _ := base64.StdEncoding.DecodeString(sig64)
+	sum := sha256.Sum256(data)
+	want := restrictedStatement("x86_64-el9", tarHash, "lhcb", tarName, hex.EncodeToString(sum[:]))
+	pubSum := sha256.Sum256(g.pub)
+	if kid != hex.EncodeToString(pubSum[:8]) || !ed25519.Verify(g.pub, want, sig) || g.signed.Load() != 1 {
+		t.Fatalf("not signed as stored: %v", m.meta[filed("lhcb")])
+	}
+	// an ungated binding signs nothing
+	other := []byte("other")
+	st = start(t, s, final, tok, other)
+	m.upload("STAGING/"+st.ID, other)
+	if w := post(s, final+"?complete="+st.ID, tok, ""); w.Code != 201 || m.meta[finalKey]["bits-signature"] != "" || g.signed.Load() != 1 {
+		t.Fatalf("an ungated build signed: %d %v", w.Code, m.meta[finalKey])
 	}
 }

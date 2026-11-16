@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"path"
 	"regexp"
 	"strings"
 	"sync"
@@ -178,6 +179,16 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 	u.expires = now.Add(expiry + completeGrace)
 	if !s.uploads.add(id, u, now, s.stores) {
 		return failMsg(w, http.StatusServiceUnavailable, "full")
+	}
+	if b.Gate != "" { // signed now (after the subject's limit), kept with it: reused only if it verifies
+		arch, rest, _ := strings.Cut(b.unprefixed(dir), "/") // <arch>/store/<h2>/<hash>
+		kid, sig, err := s.signer.sign(r.Context(), restrictedStatement(arch, path.Base(rest), t.Grp, req.Name, req.SHA256))
+		if err != nil {
+			s.uploads.remove(id)
+			log.Printf("sign %s: %v", key, err)
+			return failMsg(w, http.StatusServiceUnavailable, "unsigned")
+		}
+		u.meta["bits-signature"] = kid + ":" + base64.StdEncoding.EncodeToString(sig) // read at complete: after the id is sent
 	}
 	answer := map[string]any{"id": id, "method": http.MethodPut}
 	if u.partMD5 != nil {

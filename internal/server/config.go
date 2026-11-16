@@ -35,6 +35,8 @@ type Config struct {
 	IndexVerify string                `json:"index_verify"` // a bucket listed against the index; empty: 24h
 	// The common manifests' signing keys (PEM, bits' keys/*.pem); none: no manifest counts as verified.
 	ManifestKeys []string `json:"manifest_keys"`
+	// Signs each build a gated binding stores (bits checks it before reuse); needed by one.
+	RestrictedSigner SignerConf `json:"restricted_signer"`
 }
 
 // FetchConf says where fetches may go (fetch.go). Site addresses (private ones and

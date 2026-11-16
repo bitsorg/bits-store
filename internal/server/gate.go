@@ -39,15 +39,15 @@ func readable(b *Binding, t *token.Token) []string {
 }
 
 // gatedLookup finds the build in dir among the groups t reads, in that order: the
-// binding as that group has it, and the object; "" when none has it.
-func (s *Server) gatedLookup(ctx context.Context, b *Binding, t *token.Token, dir string, now time.Time) (*Binding, string, error) {
+// binding as that group has it, the object and the group; "" when none has it.
+func (s *Server) gatedLookup(ctx context.Context, b *Binding, t *token.Token, dir string, now time.Time) (*Binding, string, string, error) {
 	for _, g := range readable(b, t) {
 		gb, gdir := within(b, g, dir)
 		if key, err := s.found.lookup(ctx, s, gb, gdir, now); err != nil || key != "" {
-			return gb, key, err
+			return gb, key, g, err
 		}
 	}
-	return b, "", nil
+	return b, "", "", nil
 }
 
 // grouped says whether a tarballs prefix of the bucket at is a gated binding's,

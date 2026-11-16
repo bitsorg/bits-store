@@ -52,8 +52,9 @@ type Server struct {
 	index       *index.Index  // nil: none (no -data)
 	verifyEvery time.Duration // how often a bucket is listed against the index
 
-	manifestKeys index.Keys // the common manifests' signing keys
-	reads        *readTable // GETs redirected, for the index
+	manifestKeys index.Keys   // the common manifests' signing keys
+	reads        *readTable   // GETs redirected, for the index
+	signer       *proxySigner // signs a gated binding's builds; nil: none
 }
 
 // New builds a Server from a checked configuration.
@@ -89,10 +90,19 @@ func New(c *Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	signer, err := newSigner(c.RestrictedSigner)
+	if err != nil {
+		return nil, err
+	}
+	for _, b := range bs {
+		if b.Gate != "" && signer == nil {
+			return nil, fmt.Errorf("binding %q: a gate needs restricted_signer, to sign its builds", b.Prefix)
+		}
+	}
 	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
 		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{},
 		policy: pol, fetchClient: pol.client(), plain: map[string]objectStore{}, accessLog: accessLog,
-		health: &volumeHealth{}, verifyEvery: every, manifestKeys: mkeys, reads: &readTable{}}
+		health: &volumeHealth{}, verifyEvery: every, manifestKeys: mkeys, reads: &readTable{}, signer: signer}
 	for name, vol := range c.Volumes {
 		s.place[name] = normEndpoint(vol.Endpoint) + " " + vol.Bucket
 		s.plain[name] = plainStore{strings.TrimSuffix(vol.Endpoint, "/"), vol.Bucket}
@@ -206,8 +216,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		return s.answerRevisions(w, r, b, key, segs), t, p
 	}
 	if dir != "" {
+		var group string // a gated build's: its folder, what its signature names (not its metadata)
 		if b.Gate != "" {
-			b, key, err = s.gatedLookup(r.Context(), b, t, dir, now)
+			b, key, group, err = s.gatedLookup(r.Context(), b, t, dir, now)
 		} else {
 			key, err = s.found.lookup(r.Context(), s, b, dir, now)
 		}
@@ -218,6 +229,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 			return fail(w, http.StatusNotFound), t, p
 		}
 		w.Header().Set("Bits-Object-Name", path.Base(key))
+		if group != "" {
+			w.Header().Set("Bits-Object-Group", group)
+		}
 	}
 	if b.mirror != nil && rawQuery != "" && t != nil {
 		return s.fetchRead(w, r, rawQuery, b, key, t, now), t, p
