@@ -94,6 +94,17 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   listing found (`bits_store_index_drift`, `kind` missing, changed or extra) and when
   it began (`bits_store_index_verified_seconds`); `bits_store_index_errors_total`,
   the writes the index failed to record. Scrapes within a minute share one answer.
+- `bits-store -gc -config config.json -data DIR` plans a collection from the service's
+  index, read only, and exits (0; 2 when a volume is refused; 1 on an error): per
+  architecture under the `tarballs` bindings, the packages
+  (`<arch>/store/<h2>/<hash>/<file>`) older than `-gc-grace` (7 days) whose hash is no
+  root, in architectures a verified common manifest lists packages of. Roots: the
+  hashes any common manifest lists, those the BOMs of their sources list, and those of
+  BOMs younger than the grace. Files that are not packages always stay. Refused: without
+  `manifest_keys`, a listing older than `index_verify` and two hours, manifests unread or
+  with packages skipped, common manifests outside a `manifests` binding of the same
+  bucket, a common manifest or its `.sig` in the store not as the index read it, or more
+  than `-gc-max` (0.25) of an architecture's packages to go. It deletes nothing.
 - `access_log`: `errors` (the default) logs errors and writes, not hits; `all` every
   request; `none` no request lines. Fetches and failures are logged in any case.
 - Writes go through staging; a client never gets a URL for a final key:

@@ -26,6 +26,9 @@ func main() {
 	check := flag.Bool("check", false, "check the configuration file, and that each volume's keys list its bucket, and exit: 0 if the service would take it")
 	every := flag.Duration("reload-every", 5*time.Second, "how often to look for a changed configuration file; 0: never")
 	data := flag.String("data", "", "directory for the index (index.db); none: no index")
+	gc := flag.Bool("gc", false, "plan a collection of the packages no verified common manifest lists, from the index in -data, and exit")
+	gcGrace := flag.Duration("gc-grace", 7*24*time.Hour, "with -gc: packages younger than this stay")
+	gcMax := flag.Float64("gc-max", 0.25, "with -gc: refuse when more than this share of an architecture's packages would go")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
@@ -41,6 +44,9 @@ func main() {
 		}
 		fmt.Println("ok")
 		return
+	}
+	if *gc {
+		os.Exit(server.GC(*config, *data, server.GCOptions{Grace: *gcGrace, Max: *gcMax}, os.Stdout))
 	}
 	h, cfg, err := server.NewReloader(*config)
 	if err != nil {

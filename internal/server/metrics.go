@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bitsorg/bits-store/internal/index"
 )
 
 const metricsEvery = time.Minute // scrapes within it share one answer
@@ -134,7 +136,8 @@ func (s *Server) collectPackages(ctx context.Context, bucket, vol string, prefix
 		if p == "" {
 			skip = 0
 		}
-		err := s.index.Each(ctx, bucket, p, func(k string, size int64) {
+		err := s.index.Each(ctx, bucket, p, func(o index.Object) {
+			k, size := o.Key, o.Size
 			seg := strings.SplitN(k[skip:], "/", 6) // <arch>/store/<h2>/<hash>/<file>
 			if seg[0] == "" {
 				return

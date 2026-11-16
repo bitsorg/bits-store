@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -37,7 +38,7 @@ type Index struct {
 }
 
 // schemaVersion is the tables' layout: a file of another is dropped (a cache, refilled by a listing).
-const schemaVersion = 3
+const schemaVersion = 4
 
 const schema = `
 CREATE TABLE IF NOT EXISTS objects (
@@ -62,6 +63,7 @@ CREATE TABLE IF NOT EXISTS manifests (
   sig_etag TEXT NOT NULL,    -- a common manifest's: of its .sig when read ('' none)
   keys    TEXT NOT NULL,     -- the manifest keys it was checked with
   verified_by TEXT NOT NULL, -- the key that verifies its .sig ('' none)
+  skipped INTEGER NOT NULL,  -- packages not read: no hash as a string
   PRIMARY KEY (bucket, key)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS manifest_builds (  -- a BOM's build; a common manifest's sources
   bucket  TEXT NOT NULL, key TEXT NOT NULL, build_id TEXT NOT NULL,
@@ -86,6 +88,26 @@ func Open(path string) (*Index, error) {
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("index %s: %v", path, err)
+	}
+	return &Index{db: db}, nil
+}
+
+// OpenReadOnly opens the index file at path for reading only, as another process
+// (bits-store -gc) does beside the service: never created, migrated or written.
+func OpenReadOnly(path string) (*Index, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("index %s: %v", path, err)
+	}
+	db, err := sql.Open("sqlite", "file:"+(&url.URL{Path: path}).EscapedPath()+
+		"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != schemaVersion {
+		db.Close()
+		return nil, fmt.Errorf("index %s: layout %d, not this release's %d (%v): run the service first", path, v, schemaVersion, err)
 	}
 	return &Index{db: db}, nil
 }

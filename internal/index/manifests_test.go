@@ -24,12 +24,16 @@ const common = `{"kind": "common-manifest", "sources": ["release_x-1", "release_
 func TestParse(t *testing.T) {
 	m := Parse("MANIFESTS/release_x-1/p5-a.el9.json", "e", []byte(bom))
 	want := []Entry{{"el9", "aa", "ROOT", "6"}, {"el9", "bb", "zlib", "1"}} // the BOM's arch; once each
-	if m.Kind != KindBOM || !slices.Equal(m.Builds, []string{"release_x-1"}) || !slices.Equal(m.Entries, want) {
+	if m.Kind != KindBOM || !slices.Equal(m.Builds, []string{"release_x-1"}) || !slices.Equal(m.Entries, want) || m.Skipped != 2 {
 		t.Fatalf("BOM: %+v", m)
 	}
 	if m := Parse("MANIFESTS/common-manifest-el9.json", "e", []byte(strings.Replace(common, `"release_y-2"`, `"release_y-2", 3, ""`, 1))); m.Kind != KindCommon ||
 		!slices.Equal(m.Builds, []string{"release_x-1", "release_y-2"}) || len(m.Entries) != 1 {
 		t.Fatalf("common manifest: %+v", m)
+	}
+	if m := Parse("MANIFESTS/x/a.json", "e", []byte(`{"build_id": "x", "packages": [{"hash": ""}, {"package": "p"}]}`)); m.Kind != KindBOM ||
+		m.Skipped != 0 || m.Entries != nil { // packages not stored, as bits writes them: nothing unknown
+		t.Fatalf("no hash: %+v", m)
 	}
 	for name, body := range map[string]string{
 		"MANIFESTS/x/common-manifest-el9.json": `{"kind": "other", "packages": []}`, // a common manifest's name, not its kind
@@ -174,5 +178,32 @@ func TestCertified(t *testing.T) {
 	}
 	if owner, signed, _ := x.Certified(ctx, "b", "k2"); len(owner) != 0 || len(signed) != 0 {
 		t.Fatalf("checked with keys no longer in force: %v %v", owner, signed)
+	}
+}
+
+// Another process reads the service's index as it is, or not at all.
+func TestOpenReadOnly(t *testing.T) {
+	x, path := open(t)
+	x.Put(ctx, "b", Object{Key: "k", Size: 1, ETag: "e"}, time.Now())
+	y, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := y.Total(ctx, "b"); c.Objects != 1 {
+		t.Fatal("not read")
+	}
+	if err := y.Put(ctx, "b", Object{Key: "k2", Size: 1, ETag: "e"}, time.Now()); err == nil {
+		t.Fatal("written")
+	}
+	y.Close()
+	x.db.Exec(`PRAGMA user_version = 99`)
+	if _, err := OpenReadOnly(path); err == nil {
+		t.Fatal("another layout opened")
+	}
+	if c, _ := x.Total(ctx, "b"); c.Objects != 1 {
+		t.Fatal("the service's index changed")
+	}
+	if _, err := OpenReadOnly(path + ".none"); err == nil {
+		t.Fatal("a missing file opened")
 	}
 }

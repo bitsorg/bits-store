@@ -1,0 +1,261 @@
+// SPDX-License-Identifier: Apache-2.0
+
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"maps"
+	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/bitsorg/bits-store/internal/index"
+)
+
+// GCOptions bound a collection: younger packages stay; it refuses to sweep more
+// than Max (a share) of an architecture's packages.
+type GCOptions struct {
+	Grace time.Duration
+	Max   float64
+}
+
+// GCArch is the plan for one architecture of a bucket's package tree.
+type GCArch struct {
+	Arch                      string
+	Certified                 bool // a verified common manifest lists packages of it: else nothing goes
+	Kept, Young, Other, Sweep int  // Other: files that are not packages, never swept
+	KeptBytes, SweepBytes     int64
+	sweep                     []index.Object
+}
+
+// GCPlan is a bucket's collection, named by its first volume; Refused says why
+// nothing of it may be swept.
+type GCPlan struct {
+	Volume, Refused string
+	Arches          []*GCArch
+}
+
+// A package file, as bits' gc.py has it: <arch>/store/<h2>/<hash>/<file>, h2 the hash's start.
+var packageKey = regexp.MustCompile(`^([0-9A-Za-z][0-9A-Za-z._+-]*)/store/([0-9A-Za-z]{2})/` +
+	`([0-9A-Za-z][0-9A-Za-z._-]*)/[0-9A-Za-z][0-9A-Za-z._+-]*$`)
+
+// PlanGC plans a collection of each bucket with packages, from the index: a package
+// goes when its hash is no root (index.Roots), it is older than o.Grace and a verified
+// common manifest lists packages of its architecture. Fail-closed: a bucket whose
+// index may not be the store (not listed lately, manifests unread, common manifests
+// changed since) is refused.
+func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
+	tars, mans, name := map[string][]string{}, map[string][]string{}, map[string]string{}
+	for _, b := range s.bindings {
+		at, p := s.place[b.Volume], strings.TrimSuffix(b.KeyPrefix, "/")
+		if s.stores[b.Volume].Anonymous() {
+			continue
+		}
+		if n, ok := name[at]; !ok || b.Volume < n {
+			name[at] = b.Volume
+		}
+		switch b.Format {
+		case "tarballs":
+			tars[at] = append(tars[at], p)
+		case "manifests":
+			mans[at] = append(mans[at], p)
+		}
+	}
+	var plans []*GCPlan
+	for _, bucket := range slices.Sorted(maps.Keys(tars)) {
+		p := &GCPlan{Volume: name[bucket]}
+		plans = append(plans, p)
+		why, err := s.gcRefused(ctx, bucket, p.Volume, mans[bucket])
+		if err != nil {
+			return nil, err
+		}
+		p.Refused = why
+		if why != "" {
+			continue
+		}
+		oldest := s.now().Add(-o.Grace)
+		roots, certified, err := s.index.Roots(ctx, bucket, s.manifestKeys.IDs(), oldest)
+		if err != nil {
+			return nil, err
+		}
+		arches := map[string]*GCArch{}
+		for _, prefix := range slices.Compact(slices.Sorted(slices.Values(tars[bucket]))) {
+			skip := len(prefix) + 1
+			if prefix == "" {
+				skip = 0
+			}
+			err := s.index.Each(ctx, bucket, prefix, func(obj index.Object) {
+				rest := obj.Key[skip:]
+				arch, _, _ := strings.Cut(rest, "/")
+				a := arches[arch]
+				if a == nil {
+					a = &GCArch{Arch: arch, Certified: certified[arch]}
+					arches[arch] = a
+				}
+				m := packageKey.FindStringSubmatch(rest)
+				switch {
+				case m == nil || !strings.HasPrefix(m[3], m[2]):
+					a.Other++
+				case !a.Certified || roots[strings.ToLower(m[3])]:
+					a.Kept++
+					a.KeptBytes += obj.Size
+				case obj.Mtime.After(oldest):
+					a.Young++
+				default:
+					a.Sweep++
+					a.SweepBytes += obj.Size
+					a.sweep = append(a.sweep, obj)
+				}
+			})
+			if err != nil {
+				return nil, err
+			}
+		}
+		for _, k := range slices.Sorted(maps.Keys(arches)) {
+			a := arches[k]
+			p.Arches = append(p.Arches, a)
+			if all := a.Kept + a.Young + a.Sweep; a.Sweep > 0 && float64(a.Sweep) > o.Max*float64(all) && p.Refused == "" {
+				p.Refused = fmt.Sprintf("%s: %d of its %d packages would go, more than %g of them", k, a.Sweep, all, o.Max)
+			}
+		}
+	}
+	return plans, nil
+}
+
+// gcRefused says why a bucket's index may not stand for the store, "" when it may:
+// no manifest keys, no recent listing, manifests not all read, or the common
+// manifests (and their .sig) in the store not those the index read.
+func (s *Server) gcRefused(ctx context.Context, bucket, volume string, mans []string) (string, error) {
+	keys := s.manifestKeys.IDs()
+	if keys == "" {
+		return "no manifest_keys: no common manifest is verified", nil
+	}
+	at, _, ok, err := s.index.Verified(ctx, bucket)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "it was never listed", nil
+	}
+	if age := s.now().Sub(at); age > s.verifyEvery+2*time.Hour {
+		return fmt.Sprintf("its last listing is %s old", age.Round(time.Minute)), nil
+	}
+	if n, err := s.index.Unread(ctx, bucket); err != nil || n > 0 {
+		return fmt.Sprintf("%d manifests could not be read, or not all of their packages", n), err
+	}
+	if strays, err := s.index.Strays(ctx, bucket); err != nil || len(strays) > 0 {
+		return fmt.Sprintf("common manifests outside the manifests bindings, or not read as such: %s",
+			strings.Join(strays, ", ")), err
+	}
+	for _, p := range mans {
+		todo, err := s.index.ManifestsToRead(ctx, bucket, p, keys, s.now(), 1)
+		if err != nil || len(todo) > 0 {
+			return "manifests not all read yet", err
+		}
+	}
+	commons, err := s.index.Commons(ctx, bucket, keys)
+	if err != nil {
+		return "", err
+	}
+	if !slices.ContainsFunc(slices.Collect(maps.Values(commons)), func(c index.Common) bool { return c.Verified }) {
+		return "no common manifest verifies with manifest_keys", nil
+	}
+	// the store now: no common manifest new at the top of a binding, each as read
+	st := s.stores[volume]
+	for _, p := range mans {
+		start := "common-manifest-"
+		if p != "" {
+			start = p + "/" + start
+		}
+		names, err := st.List(ctx, start)
+		if err != nil {
+			return fmt.Sprintf("the common manifests could not be listed: %v", err), nil
+		}
+		for _, n := range names {
+			if _, ok := commons[n]; !ok && strings.HasSuffix(n, ".json") {
+				return n + " is new since the index read the manifests", nil
+			}
+		}
+	}
+	for _, n := range slices.Sorted(maps.Keys(commons)) {
+		for _, f := range []struct{ key, etag string }{{n, commons[n].ETag}, {n + ".sig", commons[n].SigETag}} {
+			fi, ok, err := st.Stat(ctx, f.key)
+			if err != nil {
+				return fmt.Sprintf("%s could not be read: %v", f.key, err), nil
+			}
+			if !ok {
+				fi.ETag = ""
+			}
+			if fi.ETag != f.etag {
+				return f.key + " changed since the index read it", nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// GC plans a collection with the configuration at path and the index in data (as
+// the running service has them), and writes the plan to out: 0 when every bucket
+// may be swept, 2 when one is refused, 1 on an error. It deletes nothing.
+func GC(path, data string, o GCOptions, out io.Writer) int {
+	c, err := LoadConfig(path)
+	switch {
+	case err != nil:
+	case data == "":
+		err = errors.New("-gc needs -data, the service's index")
+	case o.Grace <= 0:
+		err = errors.New("-gc-grace: a positive duration")
+	case !(o.Max > 0 && o.Max <= 1): // NaN too
+		err = errors.New("-gc-max: a share above 0, at most 1")
+	}
+	var s *Server
+	if err == nil {
+		s, err = New(c)
+	}
+	if err == nil {
+		s.index, err = index.OpenReadOnly(filepath.Join(data, "index.db"))
+	}
+	var plans []*GCPlan
+	if err == nil {
+		defer s.index.Close()
+		plans, err = s.PlanGC(context.Background(), o)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "gc:", err)
+		return 1
+	}
+	if len(plans) == 0 {
+		fmt.Fprintln(out, "no volume with keys holds packages (a tarballs binding): nothing to plan")
+	}
+	code := 0
+	for _, p := range plans {
+		if p.Refused != "" {
+			fmt.Fprintf(out, "volume %q: nothing may go: %s\n", p.Volume, p.Refused)
+			code = 2
+		}
+		for _, a := range p.Arches {
+			if !a.Certified {
+				fmt.Fprintf(out, "volume %q: %s: not certified, all %d kept\n", p.Volume, a.Arch, a.Kept+a.Other)
+				continue
+			}
+			fmt.Fprintf(out, "volume %q: %s: %d kept (%s), %d younger than %s, %d not packages; %d would go (%s)\n",
+				p.Volume, a.Arch, a.Kept, bytesOf(a.KeptBytes), a.Young, o.Grace, a.Other, a.Sweep, bytesOf(a.SweepBytes))
+		}
+	}
+	fmt.Fprintln(out, "a plan: nothing was deleted")
+	return code
+}
+
+func bytesOf(n int64) string {
+	f, unit := float64(n), 0
+	for f >= 1024 && unit < 4 {
+		f, unit = f/1024, unit+1
+	}
+	return fmt.Sprintf("%.1f %s", f, []string{"B", "KiB", "MiB", "GiB", "TiB"}[unit])
+}

@@ -33,6 +33,7 @@ type Manifest struct {
 	Key, ETag, Kind           string
 	At                        time.Time // when read
 	SigETag, Keys, VerifiedBy string
+	Skipped                   int      // packages not objects, or hashes not strings: GC refuses while there are
 	Builds                    []string // a BOM's build; a common manifest's sources
 	Entries                   []Entry
 }
@@ -67,19 +68,24 @@ func Parse(key, etag string, body []byte) Manifest {
 	}
 	seen := map[[2]string]bool{}
 	for _, raw := range doc.Packages {
-		var p struct {
-			Package, Version, Hash string
-			Arch                   string `json:"effective_architecture"`
-		}
-		if json.Unmarshal(raw, &p) != nil || p.Hash == "" {
+		var p map[string]any // each field on its own: one of another type loses only itself
+		err := json.Unmarshal(raw, &p)
+		str := func(k string) string { s, _ := p[k].(string); return s }
+		e := Entry{Arch: str("effective_architecture"), Hash: strings.ToLower(str("hash")),
+			Package: str("package"), Version: str("version")}
+		if h, named := p["hash"]; err != nil || p == nil || named && e.Hash == "" && h != "" {
+			m.Skipped++ // not a package, or its hash not a string: what it names is unknown
 			continue
 		}
-		if p.Arch == "" {
-			p.Arch = doc.Arch
+		if e.Hash == "" {
+			continue // none (bits writes "" for a package not stored)
 		}
-		if k := [2]string{p.Arch, p.Hash}; !seen[k] {
+		if e.Arch == "" {
+			e.Arch = doc.Arch
+		}
+		if k := [2]string{e.Arch, e.Hash}; !seen[k] {
 			seen[k] = true
-			m.Entries = append(m.Entries, Entry{Arch: p.Arch, Hash: p.Hash, Package: p.Package, Version: p.Version})
+			m.Entries = append(m.Entries, e)
 		}
 	}
 	return m
@@ -135,8 +141,8 @@ func (x *Index) PutManifest(ctx context.Context, bucket string, m Manifest) erro
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO manifests (bucket, key, etag, kind, read_at, sig_etag, keys,
-		verified_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, bucket, m.Key, m.ETag, m.Kind, ms(m.At), m.SigETag, m.Keys,
-		m.VerifiedBy); err != nil {
+		verified_by, skipped) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, bucket, m.Key, m.ETag, m.Kind, ms(m.At), m.SigETag,
+		m.Keys, m.VerifiedBy, m.Skipped); err != nil {
 		return err
 	}
 	for _, b := range m.Builds {
@@ -268,25 +274,26 @@ func (x *Index) Certified(ctx context.Context, bucket, keys string) (owner map[[
 	return owner, signed, rows.Err()
 }
 
-// Each calls fn with the key and size of each of the bucket's objects under prefix
-// (a folder without its "/"; "": the bucket), in key order.
-func (x *Index) Each(ctx context.Context, bucket, prefix string, fn func(key string, size int64)) error {
+// Each calls fn with each of the bucket's objects under prefix (a folder without
+// its "/"; "": the bucket), in key order; their SHA-256 is not read.
+func (x *Index) Each(ctx context.Context, bucket, prefix string, fn func(Object)) error {
 	q, args := "", []any{bucket}
 	if prefix != "" {
 		q, args = " AND key >= ? AND key < ?", []any{bucket, prefix + "/", prefix + "0"}
 	}
-	rows, err := x.db.QueryContext(ctx, `SELECT key, size FROM objects WHERE bucket = ?`+q+` ORDER BY key`, args...)
+	rows, err := x.db.QueryContext(ctx, `SELECT key, size, etag, mtime FROM objects WHERE bucket = ?`+q+` ORDER BY key`, args...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var k string
-		var n int64
-		if err := rows.Scan(&k, &n); err != nil {
+		var o Object
+		var mtime int64
+		if err := rows.Scan(&o.Key, &o.Size, &o.ETag, &mtime); err != nil {
 			return err
 		}
-		fn(k, n)
+		o.Mtime = time.UnixMilli(mtime)
+		fn(o)
 	}
 	return rows.Err()
 }
