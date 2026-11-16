@@ -281,7 +281,7 @@ func (x *Index) Each(ctx context.Context, bucket, prefix string, fn func(Object)
 	if prefix != "" {
 		q, args = " AND key >= ? AND key < ?", []any{bucket, prefix + "/", prefix + "0"}
 	}
-	rows, err := x.db.QueryContext(ctx, `SELECT key, size, etag, mtime, reads, read_at FROM objects
+	rows, err := x.db.QueryContext(ctx, `SELECT key, size, etag, mtime, reads, read_at, grp FROM objects
 		WHERE bucket = ?`+q+` ORDER BY key`, args...)
 	if err != nil {
 		return err
@@ -290,7 +290,7 @@ func (x *Index) Each(ctx context.Context, bucket, prefix string, fn func(Object)
 	for rows.Next() {
 		var o Object
 		var mtime, readAt int64
-		if err := rows.Scan(&o.Key, &o.Size, &o.ETag, &mtime, &o.Reads, &readAt); err != nil {
+		if err := rows.Scan(&o.Key, &o.Size, &o.ETag, &mtime, &o.Reads, &readAt, &o.Grp); err != nil {
 			return err
 		}
 		o.Mtime = time.UnixMilli(mtime)

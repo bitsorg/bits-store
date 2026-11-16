@@ -48,11 +48,56 @@ func TestAPromoteIsIndexed(t *testing.T) {
 	}
 	sum := sha256.Sum256(data)
 	o, ok := indexed(t, s, "s3", finalKey)
-	if !ok || o.Size != int64(len(data)) || o.ETag != m.etag(finalKey) || o.SHA256 != hex.EncodeToString(sum[:]) {
-		t.Fatalf("not indexed as promoted: %+v %v", o, ok)
+	if !ok || o.Size != int64(len(data)) || o.ETag != m.etag(finalKey) || o.SHA256 != hex.EncodeToString(sum[:]) ||
+		o.Grp != "lhcb" || m.meta[finalKey]["bits-group"] != "lhcb" {
+		t.Fatalf("not indexed as promoted, with its writer's group: %+v %v %v", o, ok, m.meta[finalKey])
+	}
+	// changed outside the service: its writer is not known any more
+	m.objs[finalKey] = []byte("other bytes")
+	now := s.now()
+	s.now = func() time.Time { return now.Add(s.verifyEvery) }
+	s.verifyDue(context.Background(), map[string]time.Time{})
+	if o, _ := indexed(t, s, "s3", finalKey); o.Grp != "" {
+		t.Fatalf("a changed object kept its writer: %+v", o)
 	}
 	if _, ok := indexed(t, s, "s3", "STAGING/"+st.ID); ok {
 		t.Fatal("the staged object indexed")
+	}
+}
+
+// The index takes an object's writer from the object: the same bytes from another
+// group keep the first; a stale row (deleted outside the service) is replaced.
+func TestTheWriterIsTheObjects(t *testing.T) {
+	s, tok, _ := setup(t)
+	m := newMem()
+	s.stores["s3"] = m
+	withIndex(t, s)
+	data := []byte("package tarball")
+	st := start(t, s, final, tok, data)
+	m.upload("STAGING/"+st.ID, data)
+	m.objs[finalKey], m.meta[finalKey] = data, map[string]string{"bits-group": "at%2Flas"} // came first
+	if w := post(s, final+"?complete="+st.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("complete: %d", w.Code)
+	}
+	if o, _ := indexed(t, s, "s3", finalKey); o.Grp != "at/las" || m.meta[finalKey]["bits-group"] != "at%2Flas" {
+		t.Fatalf("the first writer not kept: %+v", o)
+	}
+	delete(m.objs, finalKey)
+	st = start(t, s, final, tok, data)
+	m.upload("STAGING/"+st.ID, data)
+	if w := post(s, final+"?complete="+st.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("complete: %d", w.Code)
+	}
+	if o, _ := indexed(t, s, "s3", finalKey); o.Grp != "lhcb" {
+		t.Fatalf("a stale row's writer kept: %+v", o)
+	}
+}
+
+func TestWriter(t *testing.T) {
+	for meta, want := range map[string]string{"lhcb": "lhcb", "a%2Fb": "a/b", "%zz": "", "": ""} {
+		if g := writer(objInfo{Meta: map[string]string{"bits-group": meta}}); g != want {
+			t.Fatalf("%q: %q", meta, g)
+		}
 	}
 }
 

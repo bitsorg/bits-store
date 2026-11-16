@@ -2,7 +2,8 @@
 
 // Package index is the store's index: what each bucket holds, kept by the
 // service's own writes and checked against a listing of the bucket (Verify).
-// It is a cache: the buckets are the truth, and a listing rebuilds it.
+// It is a cache: the buckets are the truth, and a listing rebuilds it, except
+// each object's writer (its metadata, not in a listing).
 package index
 
 import (
@@ -27,6 +28,7 @@ type Object struct {
 	SHA256 string
 	Reads  int64     // GETs the service redirected to it (not reads straight from the bucket)
 	ReadAt time.Time // the last of them; zero: none
+	Grp    string    // the group whose token wrote it through the service; "": not known
 }
 
 // Drift is what a verify found the index to differ in from the bucket.
@@ -41,7 +43,7 @@ type Index struct {
 }
 
 // schemaVersion is the tables' layout: a file of another is migrated or dropped (migrate).
-const schemaVersion = 5
+const schemaVersion = 6
 
 const schema = `
 CREATE TABLE IF NOT EXISTS objects (
@@ -54,6 +56,7 @@ CREATE TABLE IF NOT EXISTS objects (
   seen    INTEGER NOT NULL,  -- ms: written by us, or the start of the listing that saw it
   reads   INTEGER NOT NULL DEFAULT 0,  -- GETs redirected to it by the service
   read_at INTEGER NOT NULL DEFAULT 0,  -- ms, the last of them
+  grp     TEXT NOT NULL DEFAULT '',    -- the group that wrote it through the service ('' not known)
   PRIMARY KEY (bucket, key)) WITHOUT ROWID;  -- a range of keys reads its rows in place
 CREATE TABLE IF NOT EXISTS verified (
   bucket  TEXT PRIMARY KEY,
@@ -119,7 +122,7 @@ func OpenReadOnly(path string) (*Index, error) {
 }
 
 // migrate makes the file's tables those of schemaVersion, in one transaction: a
-// layout 4 gains the reads; another is dropped (a cache, refilled by a listing).
+// layout 4 or 5 gains the columns added since; another is dropped (refilled by a listing).
 func migrate(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -130,20 +133,23 @@ func migrate(db *sql.DB) error {
 	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		return err
 	}
-	if v == 4 {
-		for _, c := range []string{"reads", "read_at"} {
+	// the columns each layout added to objects: an older file gains them, kept
+	added := map[int][][2]string{5: {{"reads", "INTEGER NOT NULL DEFAULT 0"}, {"read_at", "INTEGER NOT NULL DEFAULT 0"}},
+		6: {{"grp", "TEXT NOT NULL DEFAULT ''"}}}
+	for v >= 4 && v < schemaVersion {
+		v++
+		for _, c := range added[v] {
 			var n int
-			if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('objects') WHERE name = ?`, c).Scan(&n); err != nil {
+			if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('objects') WHERE name = ?`, c[0]).Scan(&n); err != nil {
 				return err
 			}
 			if n > 0 {
 				continue
 			}
-			if _, err := tx.Exec("ALTER TABLE objects ADD COLUMN " + c + " INTEGER NOT NULL DEFAULT 0"); err != nil {
+			if _, err := tx.Exec("ALTER TABLE objects ADD COLUMN " + c[0] + " " + c[1]); err != nil {
 				return err
 			}
 		}
-		v = schemaVersion
 	}
 	if v != schemaVersion {
 		for _, t := range tables {
@@ -184,10 +190,11 @@ func ms(t time.Time) int64 { return t.UnixMilli() }
 
 // Put records an object the service wrote, at now; an error is counted too.
 func (x *Index) Put(ctx context.Context, bucket string, o Object, now time.Time) error {
-	_, err := x.db.ExecContext(ctx, `INSERT INTO objects (bucket, key, size, etag, mtime, sha256, seen)
-		VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?) ON CONFLICT (bucket, key) DO UPDATE SET size = excluded.size,
-		etag = excluded.etag, mtime = excluded.mtime, sha256 = excluded.sha256, seen = excluded.seen`,
-		bucket, o.Key, o.Size, o.ETag, ms(o.Mtime), o.SHA256, ms(now))
+	_, err := x.db.ExecContext(ctx, `INSERT INTO objects (bucket, key, size, etag, mtime, sha256, seen, grp)
+		VALUES (?, ?, ?, ?, ?, NULLIF(?, ''), ?, ?) ON CONFLICT (bucket, key) DO UPDATE SET size = excluded.size,
+		etag = excluded.etag, mtime = excluded.mtime, sha256 = excluded.sha256, seen = excluded.seen,
+		grp = excluded.grp`,
+		bucket, o.Key, o.Size, o.ETag, ms(o.Mtime), o.SHA256, ms(now), o.Grp)
 	if err != nil {
 		x.errors.Add(1)
 	}
@@ -198,8 +205,8 @@ func (x *Index) Put(ctx context.Context, bucket string, o Object, now time.Time)
 func (x *Index) Get(ctx context.Context, bucket, key string) (o Object, ok bool, err error) {
 	var mtime int64
 	var sha sql.NullString
-	err = x.db.QueryRowContext(ctx, `SELECT size, etag, mtime, sha256 FROM objects WHERE bucket = ? AND key = ?`,
-		bucket, key).Scan(&o.Size, &o.ETag, &mtime, &sha)
+	err = x.db.QueryRowContext(ctx, `SELECT size, etag, mtime, sha256, grp FROM objects WHERE bucket = ? AND key = ?`,
+		bucket, key).Scan(&o.Size, &o.ETag, &mtime, &sha, &o.Grp)
 	if err == sql.ErrNoRows {
 		return Object{}, false, nil
 	}
@@ -260,7 +267,7 @@ func (x *Index) Verify(ctx context.Context, bucket string, start time.Time,
 			case err != nil:
 			case size != o.Size || etag != o.ETag:
 				d.Changed++ // the sha256 we recorded is no longer this object's
-				_, err = tx.ExecContext(ctx, `UPDATE objects SET size = ?, etag = ?, mtime = ?, sha256 = NULL,
+				_, err = tx.ExecContext(ctx, `UPDATE objects SET size = ?, etag = ?, mtime = ?, sha256 = NULL, grp = '',
 					seen = ? WHERE bucket = ? AND key = ?`, o.Size, o.ETag, ms(o.Mtime), ms(start), bucket, o.Key)
 			default:
 				_, err = tx.ExecContext(ctx, `UPDATE objects SET seen = ? WHERE bucket = ? AND key = ?`,

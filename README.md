@@ -69,12 +69,14 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   Every fetch is logged with its asker, bytes and time.
 - The index (`-data <dir>`, its `index.db`; none: no index): what each bucket of a
   volume with keys holds, `STAGING/` aside: key, size, ETag, time, and the declared
-  SHA-256 of what the service wrote. Each promote adds its object. Each bucket is
+  SHA-256 and the writer's group (its token's, kept in the object's metadata
+  `bits-group`) of what the service wrote. Each promote adds its object. Each bucket is
   listed against it when never listed, then every `index_verify` (default `24h`, at
   least `1h`), one at a time, a failed listing again after 10 minutes: what changed
   outside the service is repaired and logged as `missing`, `changed` and `extra`. It
   is a cache: losing it costs one listing, and a write it fails to record still
-  succeeds; an index of an older release is dropped and refilled. One instance only.
+  succeeds; an index of an older release is dropped and refilled (a listing does not
+  show the writers: those are lost until read from the objects). One instance only.
   It also reads the `.json` files under each `manifests` binding (not `rev-index/`;
   up to 16 MiB, 500 a minute per bucket, never on a request), new or changed: a BOM
   (a `build_id` and `packages`) gives its build and the (architecture, hash) of each

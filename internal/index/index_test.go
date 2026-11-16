@@ -164,10 +164,10 @@ func TestTotal(t *testing.T) {
 	}
 }
 
-// An index of layout 4 gains the reads and stays: not listed again; one half
-// migrated before (the reads column there already) too.
-func TestFromLayout4(t *testing.T) {
-	for _, half := range []bool{false, true} {
+// An index of layout 4 or 5 gains the columns added since and stays: not listed
+// again; one half migrated before (a column there already) too.
+func TestFromOlderLayouts(t *testing.T) {
+	for _, from := range []string{"4", "4 and reads", "5", "5 and grp"} {
 		path := filepath.Join(t.TempDir(), "index.db")
 		db, err := sql.Open("sqlite", "file:"+path)
 		if err != nil {
@@ -180,15 +180,29 @@ func TestFromLayout4(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if half {
-			if _, err := db.Exec(`ALTER TABLE objects ADD COLUMN reads INTEGER NOT NULL DEFAULT 0`); err != nil {
+		var alter []string
+		switch from {
+		case "4 and reads":
+			alter = []string{"reads INTEGER NOT NULL DEFAULT 0"}
+		case "5 and grp":
+			alter = []string{"grp TEXT NOT NULL DEFAULT ''"}
+			fallthrough
+		case "5":
+			alter = append(alter, "reads INTEGER NOT NULL DEFAULT 0", "read_at INTEGER NOT NULL DEFAULT 0", "")
+		}
+		for _, c := range alter {
+			q := "ALTER TABLE objects ADD COLUMN " + c
+			if c == "" {
+				q = `PRAGMA user_version = 5`
+			}
+			if _, err := db.Exec(q); err != nil {
 				t.Fatal(err)
 			}
 		}
 		db.Close()
 		x, err := Open(path)
 		if err != nil {
-			t.Fatalf("half %v: %v", half, err)
+			t.Fatalf("from %s: %v", from, err)
 		}
 		if c, _ := x.Total(ctx, "b"); c.Objects != 1 {
 			t.Fatal("dropped")
@@ -197,16 +211,25 @@ func TestFromLayout4(t *testing.T) {
 			t.Fatalf("reads since %v, %v", since, err)
 		}
 		x.AddReads(ctx, map[[2]string]Read{{"b", "k"}: {N: 2, Last: time.UnixMilli(5)}, {"b", "none"}: {N: 1}})
+		if err := x.Put(ctx, "b", Object{Key: "w", Size: 1, ETag: "e", Grp: "lhcb"}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		if o, _, err := x.Get(ctx, "b", "w"); err != nil || o.Grp != "lhcb" {
+			t.Fatalf("from %s: the writer's group not kept: %+v %v", from, o, err)
+		}
 		x.Close()
 		y, err := OpenReadOnly(path)
 		if err != nil {
 			t.Fatal(err)
 		}
-		y.Each(ctx, "b", "", func(o Object) {
-			if o.Reads != 2 || o.ReadAt.UnixMilli() != 5 {
-				t.Fatalf("%+v", o)
+		n := 0
+		if err := y.Each(ctx, "b", "", func(o Object) {
+			if n++; o.Key == "k" && (o.Reads != 2 || o.ReadAt.UnixMilli() != 5 || o.Grp != "") {
+				t.Fatalf("from %s: %+v", from, o)
 			}
-		})
+		}); err != nil || n != 2 {
+			t.Fatalf("from %s: %d rows, %v", from, n, err)
+		}
 		y.Close()
 	}
 }
