@@ -32,6 +32,8 @@ type Config struct {
 	Fetch       FetchConf             `json:"fetch"`
 	AccessLog   string                `json:"access_log"`   // all, errors (default: and writes) or none
 	IndexVerify string                `json:"index_verify"` // a bucket listed against the index; empty: 24h
+	// The common manifests' signing keys (PEM, bits' keys/*.pem); none: no manifest counts as verified.
+	ManifestKeys []string `json:"manifest_keys"`
 }
 
 // FetchConf says where fetches may go (fetch.go). Site addresses (private ones and

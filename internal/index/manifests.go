@@ -27,12 +27,14 @@ type Entry struct {
 	Arch, Hash, Package, Version string
 }
 
-// Manifest is what the index keeps of a file under a manifests binding.
+// Manifest is what the index keeps of a file under a manifests binding; a common
+// manifest's signature as checked with the manifest keys Keys (their ids).
 type Manifest struct {
-	Key, ETag, Kind string
-	At              time.Time // when read
-	Builds          []string  // a BOM's build; a common manifest's sources
-	Entries         []Entry
+	Key, ETag, Kind           string
+	At                        time.Time // when read
+	SigETag, Keys, VerifiedBy string
+	Builds                    []string // a BOM's build; a common manifest's sources
+	Entries                   []Entry
 }
 
 // Parse reads a file under a manifests binding (key relative to the bucket): a
@@ -83,28 +85,38 @@ func Parse(key, etag string, body []byte) Manifest {
 	return m
 }
 
+// ToRead is a file to read, with its .sig's ETag ("" when it has none).
+type ToRead struct {
+	Key           string
+	Size          int64
+	ETag, SigETag string
+}
+
 // ManifestsToRead lists the bucket's .json objects under prefix (a folder without
 // its "/"; "": the bucket), outside its rev-index/, not read at their present ETag
-// (or unread for RetryUnread at now): at most limit.
-func (x *Index) ManifestsToRead(ctx context.Context, bucket, prefix string, now time.Time, limit int) ([]Object, error) {
+// (or unread for RetryUnread at now), or common manifests whose .sig changed or that
+// were checked with other keys than keys: at most limit.
+func (x *Index) ManifestsToRead(ctx context.Context, bucket, prefix, keys string, now time.Time, limit int) ([]ToRead, error) {
 	in, args := "", []any{bucket, "rev-index/", "rev-index0"} // "": the whole bucket
 	if prefix != "" {
 		in, args = " AND o.key >= ? AND o.key < ?", []any{bucket, prefix + "/rev-index/", prefix + "/rev-index0",
 			prefix + "/", prefix + "0"} // the folder's keys: '0' follows '/'
 	}
-	rows, err := x.db.QueryContext(ctx, `SELECT o.key, o.size, o.etag FROM objects o
+	rows, err := x.db.QueryContext(ctx, `SELECT o.key, o.size, o.etag, coalesce(sig.etag, '') FROM objects o
 		LEFT JOIN manifests m ON m.bucket = o.bucket AND m.key = o.key
+		LEFT JOIN objects sig ON sig.bucket = o.bucket AND sig.key = o.key || '.sig'
 		WHERE o.bucket = ? AND NOT (o.key >= ? AND o.key < ?)`+in+`
-		AND o.key GLOB '*.json' AND (m.key IS NULL OR m.etag != o.etag OR m.kind = ? AND m.read_at <= ?)
-		ORDER BY o.key LIMIT ?`, append(args, KindUnread, ms(now.Add(-RetryUnread)), limit)...)
+		AND o.key GLOB '*.json' AND (m.key IS NULL OR m.etag != o.etag OR m.kind = ? AND m.read_at <= ?
+		  OR m.kind = ? AND (m.keys != ? OR ? != '' AND m.sig_etag != coalesce(sig.etag, '')))
+		ORDER BY o.key LIMIT ?`, append(args, KindUnread, ms(now.Add(-RetryUnread)), KindCommon, keys, keys, limit)...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Object
+	var out []ToRead
 	for rows.Next() {
-		var o Object
-		if err := rows.Scan(&o.Key, &o.Size, &o.ETag); err != nil {
+		var o ToRead
+		if err := rows.Scan(&o.Key, &o.Size, &o.ETag, &o.SigETag); err != nil {
 			return nil, err
 		}
 		out = append(out, o)
@@ -122,8 +134,9 @@ func (x *Index) PutManifest(ctx context.Context, bucket string, m Manifest) erro
 	if err := dropManifest(ctx, tx, bucket, m.Key); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO manifests (bucket, key, etag, kind, read_at) VALUES (?, ?, ?, ?, ?)`,
-		bucket, m.Key, m.ETag, m.Kind, ms(m.At)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO manifests (bucket, key, etag, kind, read_at, sig_etag, keys,
+		verified_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, bucket, m.Key, m.ETag, m.Kind, ms(m.At), m.SigETag, m.Keys,
+		m.VerifiedBy); err != nil {
 		return err
 	}
 	for _, b := range m.Builds {
@@ -195,4 +208,15 @@ func (x *Index) Builds(ctx context.Context, bucket, key string) (kind string, bu
 		builds = append(builds, b)
 	}
 	return kind, builds, rows.Err()
+}
+
+// VerifiedBy is the key that verifies a common manifest's .sig ("" none or not indexed).
+func (x *Index) VerifiedBy(ctx context.Context, bucket, key string) (string, error) {
+	var by string
+	err := x.db.QueryRowContext(ctx, `SELECT verified_by FROM manifests WHERE bucket = ? AND key = ?`,
+		bucket, key).Scan(&by)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return by, err
 }

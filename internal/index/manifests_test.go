@@ -54,7 +54,7 @@ func TestManifestsFollowTheirObjects(t *testing.T) {
 	put("MANIFESTS/common-manifest-el9.json", "e")
 	put("TARS/el9/x.json", "e") // not under the prefix
 	keys := func() (out []string) {
-		todo, err := x.ManifestsToRead(ctx, "b", "MANIFESTS", now, 10)
+		todo, err := x.ManifestsToRead(ctx, "b", "MANIFESTS", "", now, 10)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -66,11 +66,11 @@ func TestManifestsFollowTheirObjects(t *testing.T) {
 	if got := keys(); !slices.Equal(got, []string{"MANIFESTS/common-manifest-el9.json", "MANIFESTS/release_x-1/a.el9.json"}) {
 		t.Fatalf("to read: %v", got)
 	}
-	if todo, _ := x.ManifestsToRead(ctx, "b", "MANIFESTS", now, 1); len(todo) != 1 {
+	if todo, _ := x.ManifestsToRead(ctx, "b", "MANIFESTS", "", now, 1); len(todo) != 1 {
 		t.Fatal("the limit not kept")
 	}
 	put("rev-index/el9/ROOT/6-1.json", "e") // the bucket's own markers, for a binding at its root
-	if todo, _ := x.ManifestsToRead(ctx, "b", "", now, 10); len(todo) != 4 {
+	if todo, _ := x.ManifestsToRead(ctx, "b", "", "", now, 10); len(todo) != 4 {
 		t.Fatalf("the whole bucket: %v", todo)
 	}
 	x.PutManifest(ctx, "b", Parse("MANIFESTS/release_x-1/a.el9.json", "e1", []byte(bom)))

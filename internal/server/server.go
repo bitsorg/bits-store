@@ -51,6 +51,8 @@ type Server struct {
 	scrape      metricsCache
 	index       *index.Index  // nil: none (no -data)
 	verifyEvery time.Duration // how often a bucket is listed against the index
+
+	manifestKeys index.Keys // the common manifests' signing keys
 }
 
 // New builds a Server from a checked configuration.
@@ -82,10 +84,14 @@ func New(c *Config) (*Server, error) {
 	if err != nil || every < time.Hour {
 		return nil, fmt.Errorf("index_verify: at least 1h")
 	}
+	mkeys, err := index.ParseKeys(c.ManifestKeys)
+	if err != nil {
+		return nil, err
+	}
 	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
 		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{},
 		policy: pol, fetchClient: pol.client(), plain: map[string]objectStore{}, accessLog: accessLog,
-		health: &volumeHealth{}, verifyEvery: every}
+		health: &volumeHealth{}, verifyEvery: every, manifestKeys: mkeys}
 	for name, vol := range c.Volumes {
 		s.place[name] = normEndpoint(vol.Endpoint) + " " + vol.Bucket
 		s.plain[name] = plainStore{strings.TrimSuffix(vol.Endpoint, "/"), vol.Bucket}

@@ -1,0 +1,2 @@
+A common manifest signed as bits signs them (bits_helpers.trust.sign_bytes), with a
+test key whose private bytes are 0..31: bits-store must verify what bits signs.

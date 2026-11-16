@@ -79,7 +79,10 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   up to 16 MiB, 500 a minute per bucket, never on a request), new or changed: a BOM
   (a `build_id` and `packages`) gives its build and the (architecture, hash) of each
   package, a `common-manifest-*.json` its `sources` and packages; other files are
-  noted as read.
+  noted as read, those that cannot be read tried again after an hour. A common
+  manifest is verified when its `.sig` (bits' Ed25519 envelope) verifies with one of
+  `manifest_keys` (PEM public keys, as bits' `keys/*.pem`), checked again when either
+  file or the keys change; without `manifest_keys` none is.
 - `/metrics` (with the index; Prometheus text, no token: block it in front, for the
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first

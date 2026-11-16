@@ -45,6 +45,7 @@ type memStore struct {
 	listed     int    // List calls
 	walked     int    // Walk calls
 	got        int    // Get calls
+	getFailsOn string // Get of this key fails
 	afterList  func() // runs once a listing is taken, before it is returned
 	mpSeq      int
 }
@@ -57,7 +58,7 @@ func (m *memStore) Get(_ context.Context, key string, limit int64) ([]byte, bool
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.got++
-	if m.getFails {
+	if m.getFails || key == m.getFailsOn {
 		return nil, false, fmt.Errorf("get failed")
 	}
 	b, ok := m.objs[key]

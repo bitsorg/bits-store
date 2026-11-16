@@ -37,7 +37,7 @@ type Index struct {
 }
 
 // schemaVersion is the tables' layout: a file of another is dropped (a cache, refilled by a listing).
-const schemaVersion = 2
+const schemaVersion = 3
 
 const schema = `
 CREATE TABLE IF NOT EXISTS objects (
@@ -59,6 +59,9 @@ CREATE TABLE IF NOT EXISTS manifests (
   etag    TEXT NOT NULL,     -- of the object read: read again when it changes
   kind    TEXT NOT NULL,     -- bom, common, none (not a manifest), or unread
   read_at INTEGER NOT NULL,  -- ms
+  sig_etag TEXT NOT NULL,    -- a common manifest's: of its .sig when read ('' none)
+  keys    TEXT NOT NULL,     -- the manifest keys it was checked with
+  verified_by TEXT NOT NULL, -- the key that verifies its .sig ('' none)
   PRIMARY KEY (bucket, key)) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS manifest_builds (  -- a BOM's build; a common manifest's sources
   bucket  TEXT NOT NULL, key TEXT NOT NULL, build_id TEXT NOT NULL,

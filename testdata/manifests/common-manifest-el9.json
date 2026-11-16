@@ -1,0 +1,18 @@
+{
+ "schema_version": 1,
+ "kind": "common-manifest",
+ "created_at": "2026-11-16T00:00:00Z",
+ "sources": [
+  "release_x-1"
+ ],
+ "packages": [
+  {
+   "package": "ROOT",
+   "version": "6",
+   "revision": "1",
+   "effective_architecture": "el9",
+   "hash": "aa",
+   "tarball_sha256": "00"
+  }
+ ]
+}
