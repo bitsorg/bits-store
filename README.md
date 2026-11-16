@@ -74,7 +74,12 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   least `1h`), one at a time, a failed listing again after 10 minutes: what changed
   outside the service is repaired and logged as `missing`, `changed` and `extra`. It
   is a cache: losing it costs one listing, and a write it fails to record still
-  succeeds. One instance only.
+  succeeds; an index of an older release is dropped and refilled. One instance only.
+  It also reads the `.json` files under each `manifests` binding (not `rev-index/`;
+  up to 16 MiB, 500 a minute per bucket, never on a request), new or changed: a BOM
+  (a `build_id` and `packages`) gives its build and the (architecture, hash) of each
+  package, a `common-manifest-*.json` its `sources` and packages; other files are
+  noted as read.
 - `/metrics` (with the index; Prometheus text, no token: block it in front, for the
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first

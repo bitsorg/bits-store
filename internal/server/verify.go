@@ -22,11 +22,13 @@ const (
 func (r *Reloader) UseIndex(x *index.Index) { r.cur.Load().index = x }
 
 // Verify lists each keyed bucket against the index, one at a time: when it was
-// never verified, then every index_verify. It never returns.
+// never verified, then every index_verify; then reads the manifests. It never returns.
 func (r *Reloader) Verify() {
 	failed := map[string]time.Time{} // bucket -> when its listing failed
 	for {
-		r.cur.Load().verifyDue(context.Background(), failed)
+		s := r.cur.Load()
+		s.verifyDue(context.Background(), failed)
+		s.readManifests(context.Background())
 		time.Sleep(verifyTick)
 	}
 }
@@ -71,6 +73,9 @@ func (s *Server) verifyDue(ctx context.Context, failed map[string]time.Time) {
 			continue
 		}
 		delete(failed, bucket)
+		if _, err := s.index.DropGoneManifests(ctx, bucket); err != nil {
+			log.Printf("index: volume %q: manifests: %v", name, err)
+		}
 		log.Printf("index: volume %q verified in %s: %d missing, %d changed, %d extra",
 			name, s.now().Sub(start).Round(time.Second), d.Missing, d.Changed, d.Extra)
 	}

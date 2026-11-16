@@ -36,6 +36,9 @@ type Index struct {
 	errors atomic.Int64
 }
 
+// schemaVersion is the tables' layout: a file of another is dropped (a cache, refilled by a listing).
+const schemaVersion = 2
+
 const schema = `
 CREATE TABLE IF NOT EXISTS objects (
   bucket  TEXT NOT NULL,     -- the volume's endpoint and bucket: names may change
@@ -49,7 +52,24 @@ CREATE TABLE IF NOT EXISTS objects (
 CREATE TABLE IF NOT EXISTS verified (
   bucket  TEXT PRIMARY KEY,
   at      INTEGER NOT NULL,  -- ms, the start of the listing
-  missing INTEGER NOT NULL, changed INTEGER NOT NULL, extra INTEGER NOT NULL);`
+  missing INTEGER NOT NULL, changed INTEGER NOT NULL, extra INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS manifests (
+  bucket  TEXT NOT NULL,
+  key     TEXT NOT NULL,
+  etag    TEXT NOT NULL,     -- of the object read: read again when it changes
+  kind    TEXT NOT NULL,     -- bom, common, none (not a manifest), or unread
+  read_at INTEGER NOT NULL,  -- ms
+  PRIMARY KEY (bucket, key)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS manifest_builds (  -- a BOM's build; a common manifest's sources
+  bucket  TEXT NOT NULL, key TEXT NOT NULL, build_id TEXT NOT NULL,
+  PRIMARY KEY (bucket, key, build_id)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS manifest_entries (
+  bucket  TEXT NOT NULL, key TEXT NOT NULL, arch TEXT NOT NULL, hash TEXT NOT NULL,
+  package TEXT NOT NULL, version TEXT NOT NULL,
+  PRIMARY KEY (bucket, key, arch, hash)) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS manifest_entries_by_hash ON manifest_entries (bucket, arch, hash);`
+
+var tables = []string{"objects", "verified", "manifests", "manifest_builds", "manifest_entries"}
 
 // Open opens (or creates) the index file at path.
 func Open(path string) (*Index, error) {
@@ -60,11 +80,31 @@ func Open(path string) (*Index, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("index %s: %v", path, err)
 	}
 	return &Index{db: db}, nil
+}
+
+// migrate makes the file's tables those of schemaVersion, dropping another layout's.
+func migrate(db *sql.DB) error {
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v != schemaVersion {
+		for _, t := range tables {
+			if _, err := db.Exec("DROP TABLE IF EXISTS " + t); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	_, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
+	return err
 }
 
 func (x *Index) Close() error { return x.db.Close() }

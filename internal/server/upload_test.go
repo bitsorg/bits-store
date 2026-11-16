@@ -44,6 +44,7 @@ type memStore struct {
 	getFails   bool
 	listed     int    // List calls
 	walked     int    // Walk calls
+	got        int    // Get calls
 	afterList  func() // runs once a listing is taken, before it is returned
 	mpSeq      int
 }
@@ -55,6 +56,7 @@ func newMem() *memStore {
 func (m *memStore) Get(_ context.Context, key string, limit int64) ([]byte, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.got++
 	if m.getFails {
 		return nil, false, fmt.Errorf("get failed")
 	}
