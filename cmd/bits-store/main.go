@@ -27,7 +27,8 @@ func main() {
 	every := flag.Duration("reload-every", 5*time.Second, "how often to look for a changed configuration file; 0: never")
 	data := flag.String("data", "", "directory for the index (index.db); none: no index")
 	gc := flag.Bool("gc", false, "plan a collection of the packages no verified common manifest lists, from the index in -data, and exit")
-	gcGrace := flag.Duration("gc-grace", 7*24*time.Hour, "with -gc: packages younger than this stay")
+	gcGrace := flag.Duration("gc-grace", 30*24*time.Hour, "with -gc: packages younger than this stay")
+	gcKeep := flag.Int("gc-keep-builds", 3, "with -gc: the newest this many builds of each package version stay; 0: no such rule")
 	gcMax := flag.Float64("gc-max", 0.25, "with -gc: refuse when more than this share of an architecture's packages would go")
 	gcRead := flag.Duration("gc-read", 30*24*time.Hour, "with -gc: packages read within this stay; 0: no such rule")
 	gcReads := flag.Int("gc-reads", 10, "with -gc: packages read this many times stay for four times -gc-read; 0: no such rule")
@@ -50,7 +51,7 @@ func main() {
 	}
 	if *gc {
 		os.Exit(server.GC(*config, *data, server.GCOptions{Grace: *gcGrace, Max: *gcMax, Read: *gcRead,
-			Reads: *gcReads, List: *gcList}, os.Stdout))
+			Reads: *gcReads, KeepBuilds: *gcKeep, List: *gcList}, os.Stdout))
 	}
 	h, cfg, err := server.NewReloader(*config)
 	if err != nil {

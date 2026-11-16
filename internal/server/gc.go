@@ -20,24 +20,24 @@ import (
 	"github.com/bitsorg/bits-store/internal/index"
 )
 
-// GCOptions bound a collection: packages younger than Grace stay, and those read
-// within Read, or read at least Reads times within four times Read (0: no such
-// rule); it refuses to sweep more than Max (a share) of an architecture's packages.
-// List: the plan names the files that would go.
+// GCOptions bound a collection: packages younger than Grace stay, those read within
+// Read, or read at least Reads times within four times Read (0: no such rule), and
+// the KeepBuilds newest builds of each package version; it refuses to sweep more
+// than Max (a share) of an architecture's packages. List: name the files that would go.
 type GCOptions struct {
-	Grace, Read time.Duration
-	Reads       int
-	Max         float64
-	List        bool
+	Grace, Read       time.Duration
+	Reads, KeepBuilds int
+	Max               float64
+	List              bool
 }
 
 // GCArch is the plan for one architecture of a bucket's package tree.
 type GCArch struct {
-	Arch                            string
-	Certified                       bool // a verified common manifest lists packages of it: else nothing goes
-	Kept, Young, Read, Other, Sweep int  // Other: files that are not packages, never swept; Read: read lately
-	KeptBytes, SweepBytes           int64
-	sweep                           []index.Object
+	Arch                                    string
+	Certified                               bool // a verified common manifest lists packages of it: else nothing goes
+	Kept, Young, Read, Newest, Other, Sweep int  // Other: not packages, never swept; Read: read lately; Newest: of the newest builds of their version
+	KeptBytes, SweepBytes                   int64
+	sweep                                   []index.Object
 }
 
 // GCPlan is a bucket's collection, named by its first volume; Refused says why
@@ -86,7 +86,7 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 			continue
 		}
 		oldest := s.now().Add(-o.Grace)
-		roots, certified, err := s.index.Roots(ctx, bucket, s.manifestKeys.IDs(), oldest)
+		roots, certified, err := s.index.Roots(ctx, bucket, s.manifestKeys.IDs())
 		if err != nil {
 			return nil, err
 		}
@@ -97,6 +97,7 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 			continue
 		}
 		arches, readSince, popularSince := map[string]*GCArch{}, s.now().Add(-o.Read), s.now().Add(-4*o.Read)
+		builds := map[string][]index.Object{} // the package files of each version, by architecture
 		for _, prefix := range slices.Compact(slices.Sorted(slices.Values(tars[bucket]))) {
 			skip := len(prefix) + 1
 			if prefix == "" {
@@ -123,19 +124,33 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 					o.Reads > 0 && obj.Reads >= int64(o.Reads) && obj.ReadAt.After(popularSince):
 					a.Read++
 				default:
-					a.Sweep++
-					a.SweepBytes += obj.Size
 					a.sweep = append(a.sweep, obj)
+				}
+				if m != nil && strings.HasPrefix(m[3], m[2]) { // a package; one named otherwise is its own version
+					v := prefix + "\x00" + cmp.Or(versionOf(arch, m), "?"+obj.Key)
+					builds[v] = append(builds[v], obj)
 				}
 			})
 			if err != nil {
 				return nil, err
 			}
 		}
+		newest := newestBuilds(builds, o.KeepBuilds)
 		for _, k := range slices.Sorted(maps.Keys(arches)) {
 			a := arches[k]
 			p.Arches = append(p.Arches, a)
-			if all := a.Kept + a.Young + a.Read + a.Sweep; a.Sweep > 0 && float64(a.Sweep) > o.Max*float64(all) && p.Refused == "" {
+			sweep := a.sweep[:0]
+			for _, f := range a.sweep {
+				if newest[f.Key] {
+					a.Newest++
+				} else {
+					sweep = append(sweep, f)
+					a.Sweep++
+					a.SweepBytes += f.Size
+				}
+			}
+			a.sweep = sweep
+			if all := a.Kept + a.Young + a.Read + a.Newest + a.Sweep; a.Sweep > 0 && float64(a.Sweep) > o.Max*float64(all) && p.Refused == "" {
 				p.Refused = fmt.Sprintf("%s: %d of its %d packages would go, more than %g of them", k, a.Sweep, all, o.Max)
 			}
 		}
@@ -232,6 +247,8 @@ func GC(path, data string, o GCOptions, out io.Writer) int {
 		err = errors.New("-gc-max: a share above 0, at most 1")
 	case o.Read < 0 || o.Reads < 0 || o.Read > 10*365*24*time.Hour:
 		err = errors.New("-gc-read, -gc-reads: 0 (no such rule) or more; -gc-read at most ten years")
+	case o.KeepBuilds < 0:
+		err = errors.New("-gc-keep-builds: 0 (no such rule) or more")
 	case o.Read == 0 && o.Reads > 0:
 		err = errors.New("-gc-reads counts within four times -gc-read: with -gc-read 0, set -gc-reads 0")
 	}
@@ -270,8 +287,12 @@ func writePlan(out io.Writer, plans []*GCPlan, o GCOptions) int {
 				fmt.Fprintf(out, "volume %q: %s: not certified, all %d kept\n", p.Volume, a.Arch, a.Kept+a.Other)
 				continue
 			}
-			fmt.Fprintf(out, "volume %q: %s: %d kept (%s), %d younger than %s, %d read lately, %d not packages; %d would go (%s)\n",
-				p.Volume, a.Arch, a.Kept, bytesOf(a.KeptBytes), a.Young, o.Grace, a.Read, a.Other, a.Sweep, bytesOf(a.SweepBytes))
+			newest := ""
+			if o.KeepBuilds > 0 {
+				newest = fmt.Sprintf(", %d of the %d newest builds of their version", a.Newest, o.KeepBuilds)
+			}
+			fmt.Fprintf(out, "volume %q: %s: %d kept (%s), %d younger than %s, %d read lately%s, %d not packages; %d would go (%s)\n",
+				p.Volume, a.Arch, a.Kept, bytesOf(a.KeptBytes), a.Young, o.Grace, a.Read, newest, a.Other, a.Sweep, bytesOf(a.SweepBytes))
 		}
 		verb := "would go"
 		if p.Refused != "" {
@@ -341,4 +362,34 @@ func (s *Server) strayRoots(ctx context.Context, bucket, volume string, roots ma
 		}
 	}
 	return "", nil
+}
+
+// A package file's name as bits writes it: <package>-<version>-<revision>.<arch>.tar.gz,
+// the revision a number or local<number> (where package and version split does not matter).
+var packageName = regexp.MustCompile(`^(.+)-(?:local)?[0-9]+$`)
+
+// versionOf is a package file's architecture and its name without the revision,
+// "" when the name is not as bits writes it.
+func versionOf(arch string, m []string) string {
+	file := m[0][strings.LastIndex(m[0], "/")+1:]
+	stem, ok := strings.CutSuffix(file, "."+arch+".tar.gz")
+	n := packageName.FindStringSubmatch(stem)
+	if !ok || n == nil {
+		return ""
+	}
+	return arch + "/" + n[1]
+}
+
+// newestBuilds is the keys of the n newest files (by write time) of each version.
+func newestBuilds(builds map[string][]index.Object, n int) map[string]bool {
+	out := map[string]bool{}
+	for _, fs := range builds {
+		slices.SortFunc(fs, func(a, b index.Object) int {
+			return cmp.Or(b.Mtime.Compare(a.Mtime), strings.Compare(b.Key, a.Key))
+		})
+		for _, f := range fs[:min(n, len(fs))] {
+			out[f.Key] = true
+		}
+	}
+	return out
 }

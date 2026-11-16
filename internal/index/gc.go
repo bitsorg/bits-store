@@ -5,7 +5,6 @@ package index
 import (
 	"context"
 	"strings"
-	"time"
 )
 
 // Common is an indexed common manifest: its ETag and its .sig's when read, and
@@ -66,25 +65,16 @@ func (x *Index) Strays(ctx context.Context, bucket string) ([]string, error) {
 	return out, rows.Err()
 }
 
-// Roots are the hashes a collection keeps: those any common manifest lists, those
-// the BOMs of their sources list, and those of BOMs newer than since (builds that
-// reused them may be certified soon); and the architectures that common manifests
+// Roots are the hashes a collection keeps: those any manifest lists (common
+// manifests and BOMs, of any build); and the architectures that common manifests
 // verified with keys (their ids) list, the only ones a collection may sweep.
-func (x *Index) Roots(ctx context.Context, bucket, keys string, since time.Time) (hashes, certified map[string]bool, err error) {
+func (x *Index) Roots(ctx context.Context, bucket, keys string) (hashes, certified map[string]bool, err error) {
 	hashes, certified = map[string]bool{}, map[string]bool{}
 	rows, err := x.db.QueryContext(ctx, `
 		SELECT e.hash, m.kind = ? AND ? != '' AND m.keys = ? AND m.verified_by != '', e.arch
 		  FROM manifest_entries e JOIN manifests m ON m.bucket = e.bucket AND m.key = e.key
-		  WHERE e.bucket = ? AND m.kind = ?
-		UNION ALL
-		SELECT e.hash, 0, '' FROM manifest_entries e
-		  JOIN manifests m ON m.bucket = e.bucket AND m.key = e.key AND m.kind = ?
-		  JOIN objects o ON o.bucket = e.bucket AND o.key = e.key
-		  WHERE e.bucket = ? AND (o.mtime > ? OR EXISTS (SELECT 1 FROM manifest_builds b
-		    JOIN manifest_builds s ON s.bucket = b.bucket AND s.build_id = b.build_id
-		    JOIN manifests c ON c.bucket = s.bucket AND c.key = s.key AND c.kind = ?
-		    WHERE b.bucket = e.bucket AND b.key = e.key))`,
-		KindCommon, keys, keys, bucket, KindCommon, KindBOM, bucket, ms(since), KindCommon)
+		  WHERE e.bucket = ? AND m.kind IN (?, ?)`,
+		KindCommon, keys, keys, bucket, KindCommon, KindBOM)
 	if err != nil {
 		return nil, nil, err
 	}

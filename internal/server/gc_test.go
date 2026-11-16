@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -331,5 +332,58 @@ func TestGCPlanWritten(t *testing.T) {
 	out.Reset()
 	if writePlan(&out, plans, o); strings.Contains(out.String(), "would go: ") {
 		t.Fatal("named without -gc-list")
+	}
+}
+
+// The newest builds of each version stay, by write time; a file named otherwise is
+// its own version; what any BOM lists stays, of a build certified or not.
+func TestGCKeepsTheNewestBuilds(t *testing.T) {
+	s, m, x, _ := gcSetup(t)
+	ctx := context.Background()
+	for i := range 5 {
+		h := "z" + strconv.Itoa(i) + "zz"
+		m.objs["TT/el9/store/z"+strconv.Itoa(i)+"/"+h+"/zlib-1.3-1.el9.tar.gz"] = []byte("z")
+	}
+	m.objs["TT/el9/store/z9/z9zz/zlib-1.2-1.el9.tar.gz"] = []byte("an older version, one build")
+	m.objs["TT/el9/store/z8/z8zz/zlib-1.3-local1.el9.tar.gz"] = []byte("a local revision: a build of 1.3, the oldest")
+	m.objs["PUBT/el9/store/z7/z7zz/zlib-1.3-1.el9.tar.gz"] = []byte("under another binding: not of TT's builds")
+	for i := range 4 { // each its own version
+		m.objs["TT/el9/store/qq/qq1"+strconv.Itoa(i)+"/odd.tar.gz"] = []byte("not named as bits names packages")
+	}
+	m.objs["TT/el9/store/uu/uu11/u-1-1.el9.tar.gz"] = []byte("in an uncertified build's BOM")
+	m.objs["MM/release_u-1/a.el9.json"] = []byte(`{"build_id": "release_u-1", "packages": [{"hash": "uu11", "effective_architecture": "el9"}]}`)
+	now := s.now()
+	s.now = func() time.Time { return now.Add(s.verifyEvery) }
+	s.verifyDue(ctx, map[string]time.Time{})
+	s.readManifests(ctx)
+	misplaced := "TT/el9/store/ee/zz99/zlib-1.3-1.el9.tar.gz" // not in its hash's folder: no build of 1.3
+	m.objs[misplaced] = []byte("x")
+	s.verifyDue(ctx, map[string]time.Time{})
+	x.Put(ctx, s.place["s3"], index.Object{Key: misplaced, Size: 1, ETag: m.etag(misplaced), Mtime: now}, now)
+	k8 := "TT/el9/store/z8/z8zz/zlib-1.3-local1.el9.tar.gz"
+	x.Put(ctx, s.place["s3"], index.Object{Key: k8, Size: 1, ETag: m.etag(k8), Mtime: now.Add(-90 * 24 * time.Hour)}, now)
+	for i := range 5 { // written a day apart, z4 the newest, all past the grace
+		k := "TT/el9/store/z" + strconv.Itoa(i) + "/z" + strconv.Itoa(i) + "zz/zlib-1.3-1.el9.tar.gz"
+		x.Put(ctx, s.place["s3"], index.Object{Key: k, Size: 1, ETag: m.etag(k), Mtime: now.Add(-60*24*time.Hour + time.Duration(i)*24*time.Hour)}, now)
+	}
+	plans, err := s.PlanGC(ctx, GCOptions{Grace: 7 * 24 * time.Hour, Max: 1, KeepBuilds: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var el9 *GCArch
+	for _, a := range plans[0].Arches {
+		if a.Arch == "el9" {
+			el9 = a
+		}
+	}
+	gone := map[string]bool{}
+	for _, f := range el9.sweep {
+		gone[f.Key] = true
+	}
+	// b (no manifest, one build of its version) stays as the newest of its version now
+	want := []string{"TT/el9/store/z0/z0zz/zlib-1.3-1.el9.tar.gz", "TT/el9/store/z1/z1zz/zlib-1.3-1.el9.tar.gz",
+		"TT/el9/store/z8/z8zz/zlib-1.3-local1.el9.tar.gz"}
+	if plans[0].Refused != "" || len(gone) != 3 || !gone[want[0]] || !gone[want[1]] || !gone[want[2]] || el9.Newest != 10 {
+		t.Fatalf("%q: gone %v, %d newest", plans[0].Refused, gone, el9.Newest)
 	}
 }

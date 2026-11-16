@@ -101,15 +101,17 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
 - `bits-store -gc -config config.json -data DIR` plans a collection from the service's
   index, read only, and exits (0; 2 when a volume is refused; 1 on an error): per
   architecture under the `tarballs` bindings, the packages
-  (`<arch>/store/<h2>/<hash>/<file>`) older than `-gc-grace` (7 days) whose hash is no
-  root and that were not read lately, in architectures a verified common manifest lists
-  packages of; `-gc-list` names them, with their reads. Roots: the hashes any common
-  manifest lists (those outside the `manifests` bindings, such as the orchestrator's
-  `CANARY/` ones, read at plan time), those the BOMs of their sources list, and those of
-  BOMs younger than the grace. Read lately: within `-gc-read` (30 days), or at least
-  `-gc-reads` (10) times within four times that (`-gc-read 0 -gc-reads 0`: no such
-  rule, and no wait for the reads to be counted). Files that are not
-  packages always stay. Refused: without `manifest_keys`, a listing older than
+  (`<arch>/store/<h2>/<hash>/<file>`) that no manifest keeps, older than `-gc-grace`
+  (30 days), not read lately, and not among the `-gc-keep-builds` (3) newest builds of
+  their package version (by write time, per binding; the revision a number or
+  `local<number>`, a file named otherwise its own version), in architectures a verified
+  common manifest lists packages of; `-gc-list` names them, with their reads. Kept by a
+  manifest: the hashes any BOM or common manifest lists, and common manifests outside
+  the `manifests` bindings (the orchestrator's `CANARY/` ones) are read at plan time. Read lately: within `-gc-read` (30
+  days), or at least `-gc-reads` (10) times within four times that (`-gc-read 0 -gc-reads
+  0`: no such rule, and no wait for the reads to be counted). Files that are not
+  packages always stay, and nothing outside the `tarballs` bindings is ever planned:
+  sources are kept for reference. Refused: without `manifest_keys`, a listing older than
   `index_verify` and two hours, manifests unread or with packages skipped, a common
   manifest outside the bindings that cannot be read, one inside or its `.sig` in the
   store not as the index read it, reads counted for less than `-gc-read`, or more than
