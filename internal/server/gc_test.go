@@ -211,6 +211,9 @@ func TestGCCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	x.Close()
+	if code := GC(cfg, dir, GCOptions{Grace: time.Hour, Max: 0.25, Reads: 10}, io.Discard); code != 1 {
+		t.Fatalf("-gc-reads without -gc-read: exit %d", code)
+	}
 	var out strings.Builder
 	if code := GC(cfg, dir, ok, &out); code != 0 || !strings.Contains(out.String(), "nothing to plan") {
 		t.Fatalf("exit %d: %s", code, out.String())
@@ -257,5 +260,76 @@ func TestGCStrayRoots(t *testing.T) {
 	m.objs["CANARY/common-manifest-el10.json"] = []byte(`{"kind": "common-manifest", "sources": [], "packages": [{"hash": 5}]}`)
 	if p := plan(); !strings.Contains(p.Refused, "not all of its packages") {
 		t.Fatalf("a stray with packages skipped: %q", p.Refused)
+	}
+}
+
+// What was read lately, or often, stays; reads counted for less than -gc-read refuse.
+func TestGCKeepsWhatIsRead(t *testing.T) {
+	ctx := context.Background()
+	o := GCOptions{Grace: 7 * 24 * time.Hour, Max: 0.25, Read: 30 * 24 * time.Hour, Reads: 10}
+	const b = "TT/el9/store/bb/bb22/b-1-1.el9.tar.gz"
+	day := 24 * time.Hour
+	for _, c := range []struct {
+		n     int64
+		ago   time.Duration
+		since time.Duration // reads counted for
+		goes  bool
+	}{{1, 5 * day, 31 * day, false}, {20, 60 * day, 31 * day, false}, {2, 60 * day, 31 * day, true},
+		{50, 200 * day, 31 * day, true}, {0, 0, 31 * day, true},
+		{10, 119 * day, 31 * day, false}, {10, 121 * day, 31 * day, true}, {9, 29 * day, 31 * day, false}} {
+		s, _, x, _ := gcSetup(t)
+		x.SetReadsSince(ctx, s.now().Add(-c.since))
+		if c.n > 0 {
+			x.AddReads(ctx, map[[2]string]index.Read{{s.place["s3"], b}: {N: c.n, Last: s.now().Add(-c.ago)}})
+		}
+		plans, err := s.PlanGC(ctx, o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var el9 *GCArch
+		for _, a := range plans[0].Arches {
+			if a.Arch == "el9" {
+				el9 = a
+			}
+		}
+		if plans[0].Refused != "" || (el9.Sweep == 1) != c.goes || (el9.Read == 1) == c.goes {
+			t.Fatalf("%d reads, the last %s ago: %q %+v", c.n, c.ago, plans[0].Refused, el9)
+		}
+	}
+	s, _, x, _ := gcSetup(t)
+	x.SetReadsSince(ctx, s.now().Add(-29*day))
+	if plans, _ := s.PlanGC(ctx, o); !strings.Contains(plans[0].Refused, "reads are counted since") {
+		t.Fatalf("reads counted for less than -gc-read: %q", plans[0].Refused)
+	}
+	o.Read = 0 // no read rule: no wait
+	if plans, _ := s.PlanGC(ctx, o); plans[0].Refused != "" {
+		t.Fatalf("without the read rule: %q", plans[0].Refused)
+	}
+}
+
+func TestGCPlanWritten(t *testing.T) {
+	s, _, x, _ := gcSetup(t)
+	ctx := context.Background()
+	x.AddReads(ctx, map[[2]string]index.Read{{s.place["s3"], "TT/el9/store/bb/bb22/b-1-1.el9.tar.gz"}: {N: 3, Last: s.now().Add(-90 * 24 * time.Hour)}})
+	o := GCOptions{Grace: 7 * 24 * time.Hour, Max: 0.25, List: true}
+	plans, err := s.PlanGC(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out strings.Builder
+	if code := writePlan(&out, plans, o); code != 0 {
+		t.Fatalf("exit %d", code)
+	}
+	for _, want := range []string{`volume "s3": el10: not certified, all 1 kept`,
+		`volume "s3": el9: 5 kept (61.0 B), 1 younger than 168h0m0s, 0 read lately, 2 not packages; 1 would go (3.0 B)`,
+		"would go: TT/el9/store/bb/bb22/b-1-1.el9.tar.gz 3.0 B, written 0001-01-01, 3 reads, last read 20"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("no %q in:\n%s", want, out.String())
+		}
+	}
+	o.List = false
+	out.Reset()
+	if writePlan(&out, plans, o); strings.Contains(out.String(), "would go: ") {
+		t.Fatal("named without -gc-list")
 	}
 }

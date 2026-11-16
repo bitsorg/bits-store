@@ -4,6 +4,7 @@ package index
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -160,5 +161,52 @@ func TestTotal(t *testing.T) {
 	}
 	if c, _ := x.Total(ctx, "empty"); c != (Count{}) {
 		t.Fatalf("an empty bucket: %+v", c)
+	}
+}
+
+// An index of layout 4 gains the reads and stays: not listed again; one half
+// migrated before (the reads column there already) too.
+func TestFromLayout4(t *testing.T) {
+	for _, half := range []bool{false, true} {
+		path := filepath.Join(t.TempDir(), "index.db")
+		db, err := sql.Open("sqlite", "file:"+path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, q := range []string{`CREATE TABLE objects (bucket TEXT NOT NULL, key TEXT NOT NULL, size INTEGER NOT NULL,
+			etag TEXT NOT NULL, mtime INTEGER NOT NULL, sha256 TEXT, seen INTEGER NOT NULL, PRIMARY KEY (bucket, key)) WITHOUT ROWID`,
+			`INSERT INTO objects VALUES ('b', 'k', 1, 'e', 0, NULL, 0)`, `PRAGMA user_version = 4`} {
+			if _, err := db.Exec(q); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if half {
+			if _, err := db.Exec(`ALTER TABLE objects ADD COLUMN reads INTEGER NOT NULL DEFAULT 0`); err != nil {
+				t.Fatal(err)
+			}
+		}
+		db.Close()
+		x, err := Open(path)
+		if err != nil {
+			t.Fatalf("half %v: %v", half, err)
+		}
+		if c, _ := x.Total(ctx, "b"); c.Objects != 1 {
+			t.Fatal("dropped")
+		}
+		if since, err := x.ReadsSince(ctx); err != nil || time.Since(since) > time.Minute {
+			t.Fatalf("reads since %v, %v", since, err)
+		}
+		x.AddReads(ctx, map[[2]string]Read{{"b", "k"}: {N: 2, Last: time.UnixMilli(5)}, {"b", "none"}: {N: 1}})
+		x.Close()
+		y, err := OpenReadOnly(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		y.Each(ctx, "b", "", func(o Object) {
+			if o.Reads != 2 || o.ReadAt.UnixMilli() != 5 {
+				t.Fatalf("%+v", o)
+			}
+		})
+		y.Close()
 	}
 }

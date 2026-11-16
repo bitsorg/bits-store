@@ -20,20 +20,24 @@ import (
 	"github.com/bitsorg/bits-store/internal/index"
 )
 
-// GCOptions bound a collection: younger packages stay; it refuses to sweep more
-// than Max (a share) of an architecture's packages.
+// GCOptions bound a collection: packages younger than Grace stay, and those read
+// within Read, or read at least Reads times within four times Read (0: no such
+// rule); it refuses to sweep more than Max (a share) of an architecture's packages.
+// List: the plan names the files that would go.
 type GCOptions struct {
-	Grace time.Duration
-	Max   float64
+	Grace, Read time.Duration
+	Reads       int
+	Max         float64
+	List        bool
 }
 
 // GCArch is the plan for one architecture of a bucket's package tree.
 type GCArch struct {
-	Arch                      string
-	Certified                 bool // a verified common manifest lists packages of it: else nothing goes
-	Kept, Young, Other, Sweep int  // Other: files that are not packages, never swept
-	KeptBytes, SweepBytes     int64
-	sweep                     []index.Object
+	Arch                            string
+	Certified                       bool // a verified common manifest lists packages of it: else nothing goes
+	Kept, Young, Read, Other, Sweep int  // Other: files that are not packages, never swept; Read: read lately
+	KeptBytes, SweepBytes           int64
+	sweep                           []index.Object
 }
 
 // GCPlan is a bucket's collection, named by its first volume; Refused says why
@@ -92,7 +96,7 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 			}
 			continue
 		}
-		arches := map[string]*GCArch{}
+		arches, readSince, popularSince := map[string]*GCArch{}, s.now().Add(-o.Read), s.now().Add(-4*o.Read)
 		for _, prefix := range slices.Compact(slices.Sorted(slices.Values(tars[bucket]))) {
 			skip := len(prefix) + 1
 			if prefix == "" {
@@ -115,6 +119,9 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 					a.KeptBytes += obj.Size
 				case obj.Mtime.After(oldest):
 					a.Young++
+				case o.Read > 0 && obj.ReadAt.After(readSince),
+					o.Reads > 0 && obj.Reads >= int64(o.Reads) && obj.ReadAt.After(popularSince):
+					a.Read++
 				default:
 					a.Sweep++
 					a.SweepBytes += obj.Size
@@ -128,9 +135,15 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 		for _, k := range slices.Sorted(maps.Keys(arches)) {
 			a := arches[k]
 			p.Arches = append(p.Arches, a)
-			if all := a.Kept + a.Young + a.Sweep; a.Sweep > 0 && float64(a.Sweep) > o.Max*float64(all) && p.Refused == "" {
+			if all := a.Kept + a.Young + a.Read + a.Sweep; a.Sweep > 0 && float64(a.Sweep) > o.Max*float64(all) && p.Refused == "" {
 				p.Refused = fmt.Sprintf("%s: %d of its %d packages would go, more than %g of them", k, a.Sweep, all, o.Max)
 			}
+		}
+		if since, err := s.index.ReadsSince(ctx); err != nil {
+			return nil, err
+		} else if o.Read > 0 && s.now().Sub(since) < o.Read && p.Refused == "" {
+			p.Refused = fmt.Sprintf("reads are counted since %s only: not before %s (or -gc-read 0)",
+				since.UTC().Format(time.DateOnly), since.Add(o.Read).UTC().Format(time.DateOnly))
 		}
 	}
 	return plans, nil
@@ -217,6 +230,10 @@ func GC(path, data string, o GCOptions, out io.Writer) int {
 		err = errors.New("-gc-grace: a positive duration")
 	case !(o.Max > 0 && o.Max <= 1): // NaN too
 		err = errors.New("-gc-max: a share above 0, at most 1")
+	case o.Read < 0 || o.Reads < 0 || o.Read > 10*365*24*time.Hour:
+		err = errors.New("-gc-read, -gc-reads: 0 (no such rule) or more; -gc-read at most ten years")
+	case o.Read == 0 && o.Reads > 0:
+		err = errors.New("-gc-reads counts within four times -gc-read: with -gc-read 0, set -gc-reads 0")
 	}
 	var s *Server
 	if err == nil {
@@ -234,6 +251,11 @@ func GC(path, data string, o GCOptions, out io.Writer) int {
 		fmt.Fprintln(os.Stderr, "gc:", err)
 		return 1
 	}
+	return writePlan(out, plans, o)
+}
+
+// writePlan writes plans for people: 0 when every volume may be swept, else 2.
+func writePlan(out io.Writer, plans []*GCPlan, o GCOptions) int {
 	if len(plans) == 0 {
 		fmt.Fprintln(out, "no volume with keys holds packages (a tarballs binding): nothing to plan")
 	}
@@ -248,8 +270,25 @@ func GC(path, data string, o GCOptions, out io.Writer) int {
 				fmt.Fprintf(out, "volume %q: %s: not certified, all %d kept\n", p.Volume, a.Arch, a.Kept+a.Other)
 				continue
 			}
-			fmt.Fprintf(out, "volume %q: %s: %d kept (%s), %d younger than %s, %d not packages; %d would go (%s)\n",
-				p.Volume, a.Arch, a.Kept, bytesOf(a.KeptBytes), a.Young, o.Grace, a.Other, a.Sweep, bytesOf(a.SweepBytes))
+			fmt.Fprintf(out, "volume %q: %s: %d kept (%s), %d younger than %s, %d read lately, %d not packages; %d would go (%s)\n",
+				p.Volume, a.Arch, a.Kept, bytesOf(a.KeptBytes), a.Young, o.Grace, a.Read, a.Other, a.Sweep, bytesOf(a.SweepBytes))
+		}
+		verb := "would go"
+		if p.Refused != "" {
+			verb = "would go once allowed"
+		}
+		for _, a := range p.Arches {
+			if !o.List {
+				break
+			}
+			for _, f := range a.sweep {
+				last := "never read"
+				if !f.ReadAt.IsZero() {
+					last = "last read " + f.ReadAt.UTC().Format(time.DateOnly)
+				}
+				fmt.Fprintf(out, "%s: %s %s, written %s, %d reads, %s\n", verb, f.Key, bytesOf(f.Size),
+					f.Mtime.UTC().Format(time.DateOnly), f.Reads, last)
+			}
 		}
 	}
 	fmt.Fprintln(out, "a plan: nothing was deleted")

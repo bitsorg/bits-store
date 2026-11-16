@@ -53,6 +53,7 @@ type Server struct {
 	verifyEvery time.Duration // how often a bucket is listed against the index
 
 	manifestKeys index.Keys // the common manifests' signing keys
+	reads        *readTable // GETs redirected, for the index
 }
 
 // New builds a Server from a checked configuration.
@@ -91,7 +92,7 @@ func New(c *Config) (*Server, error) {
 	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
 		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{},
 		policy: pol, fetchClient: pol.client(), plain: map[string]objectStore{}, accessLog: accessLog,
-		health: &volumeHealth{}, verifyEvery: every, manifestKeys: mkeys}
+		health: &volumeHealth{}, verifyEvery: every, manifestKeys: mkeys, reads: &readTable{}}
 	for name, vol := range c.Volumes {
 		s.place[name] = normEndpoint(vol.Endpoint) + " " + vol.Bucket
 		s.plain[name] = plainStore{strings.TrimSuffix(vol.Endpoint, "/"), vol.Bucket}
@@ -229,6 +230,9 @@ func (s *Server) redirect(w http.ResponseWriter, r *http.Request, b *Binding, ke
 	if err != nil {
 		log.Printf("presign %s: %v", key, err)
 		return fail(w, http.StatusBadGateway)
+	}
+	if s.index != nil && r.Method == http.MethodGet {
+		s.reads.add(s.place[b.Volume], key, now)
 	}
 	w.Header().Set("Location", loc)
 	w.Header().Set("Cache-Control", "no-store")

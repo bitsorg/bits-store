@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -24,6 +25,8 @@ type Object struct {
 	ETag   string
 	Mtime  time.Time
 	SHA256 string
+	Reads  int64     // GETs the service redirected to it (not reads straight from the bucket)
+	ReadAt time.Time // the last of them; zero: none
 }
 
 // Drift is what a verify found the index to differ in from the bucket.
@@ -37,8 +40,8 @@ type Index struct {
 	errors atomic.Int64
 }
 
-// schemaVersion is the tables' layout: a file of another is dropped (a cache, refilled by a listing).
-const schemaVersion = 4
+// schemaVersion is the tables' layout: a file of another is migrated or dropped (migrate).
+const schemaVersion = 5
 
 const schema = `
 CREATE TABLE IF NOT EXISTS objects (
@@ -49,6 +52,8 @@ CREATE TABLE IF NOT EXISTS objects (
   mtime   INTEGER NOT NULL,  -- ms
   sha256  TEXT,
   seen    INTEGER NOT NULL,  -- ms: written by us, or the start of the listing that saw it
+  reads   INTEGER NOT NULL DEFAULT 0,  -- GETs redirected to it by the service
+  read_at INTEGER NOT NULL DEFAULT 0,  -- ms, the last of them
   PRIMARY KEY (bucket, key)) WITHOUT ROWID;  -- a range of keys reads its rows in place
 CREATE TABLE IF NOT EXISTS verified (
   bucket  TEXT PRIMARY KEY,
@@ -72,9 +77,10 @@ CREATE TABLE IF NOT EXISTS manifest_entries (
   bucket  TEXT NOT NULL, key TEXT NOT NULL, arch TEXT NOT NULL, hash TEXT NOT NULL,
   package TEXT NOT NULL, version TEXT NOT NULL,
   PRIMARY KEY (bucket, key, arch, hash)) WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS manifest_entries_by_hash ON manifest_entries (bucket, arch, hash);`
+CREATE INDEX IF NOT EXISTS manifest_entries_by_hash ON manifest_entries (bucket, arch, hash);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);`
 
-var tables = []string{"objects", "verified", "manifests", "manifest_builds", "manifest_entries"}
+var tables = []string{"objects", "verified", "manifests", "manifest_builds", "manifest_entries", "meta"}
 
 // Open opens (or creates) the index file at path.
 func Open(path string) (*Index, error) {
@@ -112,24 +118,61 @@ func OpenReadOnly(path string) (*Index, error) {
 	return &Index{db: db}, nil
 }
 
-// migrate makes the file's tables those of schemaVersion, dropping another layout's.
+// migrate makes the file's tables those of schemaVersion, in one transaction: a
+// layout 4 gains the reads; another is dropped (a cache, refilled by a listing).
 func migrate(db *sql.DB) error {
-	var v int
-	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+	tx, err := db.Begin()
+	if err != nil {
 		return err
+	}
+	defer tx.Rollback()
+	var v int
+	if err := tx.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return err
+	}
+	if v == 4 {
+		for _, c := range []string{"reads", "read_at"} {
+			var n int
+			if err := tx.QueryRow(`SELECT count(*) FROM pragma_table_info('objects') WHERE name = ?`, c).Scan(&n); err != nil {
+				return err
+			}
+			if n > 0 {
+				continue
+			}
+			if _, err := tx.Exec("ALTER TABLE objects ADD COLUMN " + c + " INTEGER NOT NULL DEFAULT 0"); err != nil {
+				return err
+			}
+		}
+		v = schemaVersion
 	}
 	if v != schemaVersion {
 		for _, t := range tables {
-			if _, err := db.Exec("DROP TABLE IF EXISTS " + t); err != nil {
+			if _, err := tx.Exec("DROP TABLE IF EXISTS " + t); err != nil {
 				return err
 			}
 		}
 	}
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := tx.Exec(schema); err != nil {
 		return err
 	}
-	_, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion))
-	return err
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO meta (key, value) VALUES ('reads_since', ?)`,
+		strconv.FormatInt(time.Now().UnixMilli(), 10)); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// ReadsSince is when the index began counting reads: none before it are known.
+func (x *Index) ReadsSince(ctx context.Context) (time.Time, error) {
+	var v string
+	if err := x.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = 'reads_since'`).Scan(&v); err != nil {
+		return time.Time{}, err
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	return time.UnixMilli(n), err
 }
 
 func (x *Index) Close() error { return x.db.Close() }
@@ -251,4 +294,41 @@ func (x *Index) Verify(ctx context.Context, bucket string, start time.Time,
 		ON CONFLICT (bucket) DO UPDATE SET at = excluded.at, missing = excluded.missing,
 		changed = excluded.changed, extra = excluded.extra`, bucket, ms(start), d.Missing, d.Changed, d.Extra)
 	return d, err
+}
+
+// Read is the GETs of an object since the last AddReads, and the last of them.
+type Read struct {
+	N    int64
+	Last time.Time
+}
+
+// AddReads adds reads to the objects' counts, by bucket and key; objects not in
+// the index (not listed yet) lose theirs.
+func (x *Index) AddReads(ctx context.Context, reads map[[2]string]Read) error {
+	tx, err := x.db.BeginTx(ctx, nil)
+	if err != nil {
+		x.errors.Add(1)
+		return err
+	}
+	defer tx.Rollback()
+	for k, r := range reads {
+		if _, err := tx.ExecContext(ctx, `UPDATE objects SET reads = reads + ?, read_at = max(read_at, ?)
+			WHERE bucket = ? AND key = ?`, r.N, ms(r.Last), k[0], k[1]); err != nil {
+			x.errors.Add(1)
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		x.errors.Add(1)
+		return err
+	}
+	return nil
+}
+
+// SetReadsSince sets when the index began counting reads (Open sets it to now
+// for a new file): for a restored index, or a test.
+func (x *Index) SetReadsSince(ctx context.Context, t time.Time) error {
+	_, err := x.db.ExecContext(ctx, `UPDATE meta SET value = ? WHERE key = 'reads_since'`,
+		strconv.FormatInt(t.UnixMilli(), 10))
+	return err
 }
