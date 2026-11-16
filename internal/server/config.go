@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -72,6 +73,9 @@ type Binding struct {
 	Format    string `json:"format"`     // empty: "blob", the path is the key
 	Public    bool   `json:"public"`
 	MaxSize   int64  `json:"max_size"` // bytes a fetch may bring (Mirror formats); 0: 32 GiB
+	Gate      string `json:"gate"`     // "group": a build read only by the group that wrote it, and its readers
+	// With a gate: the groups that also read what a group wrote, {"sft": ["lhcb"]}.
+	Readers   map[string][]string `json:"readers"`
 	segs      []string
 	format    format.Format
 	mirror    format.Mirror    // the format, when it fetches what is missing
@@ -157,6 +161,12 @@ func (c *Config) bindings() ([]Binding, error) {
 			staged[where(v)] = true
 		}
 	}
+	gated := map[string]string{} // a gated binding's bucket name -> where: only gated bindings there
+	for _, b := range c.Bindings {
+		if v, ok := c.Volumes[b.Volume]; ok && b.Gate != "" {
+			gated[v.Bucket] = where(v)
+		}
+	}
 	out := make([]Binding, 0, len(c.Bindings))
 	for _, b := range c.Bindings {
 		segs, err := token.ParsePath(b.Prefix)
@@ -197,6 +207,17 @@ func (c *Config) bindings() ([]Binding, error) {
 			return nil, fmt.Errorf("binding %q: max_size up to %d", b.Prefix, int64(maxFetch))
 		case b.mirror != nil && b.MaxSize == 0:
 			b.MaxSize = defaultMaxSize
+		}
+		if b.Gate != "" && (b.Gate != "group" || b.Format != "tarballs" || b.Public) {
+			return nil, fmt.Errorf("binding %q: gate is \"group\", for a tarballs binding not public", b.Prefix)
+		}
+		for w, rs := range b.Readers {
+			if b.Gate == "" || w == "" || slices.Contains(rs, "") {
+				return nil, fmt.Errorf("binding %q: readers are named groups, of a gated binding", b.Prefix)
+			}
+		}
+		if at, ok := gated[vol.Bucket]; ok && (at != where(vol) || b.Gate == "") {
+			return nil, fmt.Errorf("binding %q: bucket %q is a gated binding's, for gated bindings only", b.Prefix, vol.Bucket)
 		}
 		byBucket[where(vol)] = append(byBucket[where(vol)], b.KeyPrefix)
 		seen[b.Prefix] = true

@@ -41,6 +41,11 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   bits-store finds the file by listing that hash's folder (the volume's keys need
   `s3:ListBucket`), the index later; reads remember a hit for 10 minutes, a miss for 30
   seconds. Writers with keys of their own can still add a second file under a hash.
+- A `tarballs` binding with `"gate": "group"` (not public; for packages that may not be
+  redistributed, in a bucket of their own; needs the index) reads a build only for a
+  token whose group wrote it (its `bits-group`) or is among the binding's `readers` of
+  that group (`{"sft": ["lhcb", "atlas"]}`); anyone else gets `404`, as if it were not
+  there. Writes are as for any binding.
 - `manifests` is bits' `MANIFESTS` area: the path is the key, as `blob` (the signed
   common manifests), and `GET <prefix>/rev-index/<arch>/<pkg>/<version>?revisions`
   answers `{revision: hash}` from that version's revision markers

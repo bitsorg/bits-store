@@ -206,7 +206,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		} else if key == "" {
 			return fail(w, http.StatusNotFound), t, p
 		}
+		if b.Gate != "" {
+			if ok, err := s.admits(r.Context(), b, t, key); err != nil {
+				log.Printf("gate %s: %v", key, err)
+				return fail(w, http.StatusBadGateway), t, p
+			} else if !ok {
+				return fail(w, http.StatusNotFound), t, p // refused as if not there
+			}
+		}
 		w.Header().Set("Bits-Object-Name", path.Base(key))
+	}
+	if b.Gate != "" && dir == "" {
+		return fail(w, http.StatusNotFound), t, p // a gate reads builds only
 	}
 	if b.mirror != nil && rawQuery != "" && t != nil {
 		return s.fetchRead(w, r, rawQuery, b, key, t, now), t, p

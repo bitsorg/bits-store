@@ -201,6 +201,16 @@ func (x *Index) Put(ctx context.Context, bucket string, o Object, now time.Time)
 	return err
 }
 
+// SetWriter records the writer read from an object of etag whose row has none.
+func (x *Index) SetWriter(ctx context.Context, bucket, key, etag, grp string) error {
+	_, err := x.db.ExecContext(ctx, `UPDATE objects SET grp = ? WHERE bucket = ? AND key = ? AND etag = ? AND grp = ''`,
+		grp, bucket, key, etag)
+	if err != nil {
+		x.errors.Add(1)
+	}
+	return err
+}
+
 // Get returns the bucket's row of a key; ok is false when there is none.
 func (x *Index) Get(ctx context.Context, bucket, key string) (o Object, ok bool, err error) {
 	var mtime int64
