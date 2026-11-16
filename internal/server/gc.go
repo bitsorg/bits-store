@@ -60,8 +60,8 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 	tars, mans, name := map[string][]string{}, map[string][]string{}, map[string]string{}
 	for _, b := range s.bindings {
 		at, p := s.place[b.Volume], strings.TrimSuffix(b.KeyPrefix, "/")
-		if s.stores[b.Volume].Anonymous() {
-			continue
+		if s.stores[b.Volume].Anonymous() || b.Gate != "" {
+			continue // a gated binding's builds are its groups', never collected
 		}
 		if n, ok := name[at]; !ok || b.Volume < n {
 			name[at] = b.Volume

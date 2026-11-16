@@ -48,11 +48,11 @@ The payload is a JSON object.
 | `iss` | string | issuer; must equal the verifier's configured issuer |
 | `aud` | string | the store's configured audience (a string, not a list) |
 | `sub` | string | who, for the audit log: `build:<job>` exactly when the key's signer is `build` |
-| `grp` | string | the group signed in to: the audit log, and the writer a gated binding knows (an issuer puts only a verified group here) |
+| `grp` | string | the group signed in to: the audit log, and the folder a gated binding files and reads builds under, if `[a-z0-9][a-z0-9._-]{0,63}` (an issuer puts only a verified group here) |
 | `iat` | integer | issued at, seconds since the epoch |
 | `exp` | integer | expires at, seconds since the epoch |
 | `jti` | string | unique id, for the verifier's deny-list |
-| `cap` | list | capabilities, at least one: nothing is granted beyond them (a gate narrows reads by `grp`) |
+| `cap` | list | capabilities, at least one: nothing is granted beyond them (a gate narrows them to `grp`'s builds) |
 
 All are required. `iat` and `exp` are integers from 0 to 2^53 − 1 (no fraction, no
 exponent, not booleans). With 60 seconds of leeway for clocks, the token is invalid

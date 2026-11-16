@@ -136,9 +136,13 @@ func (s *Server) collectPackages(ctx context.Context, bucket, vol string, prefix
 		if p == "" {
 			skip = 0
 		}
+		grouped := s.grouped(bucket, p)
 		err := s.index.Each(ctx, bucket, p, func(o index.Object) {
-			k, size := o.Key, o.Size
-			seg := strings.SplitN(k[skip:], "/", 6) // <arch>/store/<h2>/<hash>/<file>
+			k, size := o.Key[skip:], o.Size
+			if grouped {
+				_, k, _ = strings.Cut(k, "/") // <group>/ first
+			}
+			seg := strings.SplitN(k, "/", 6) // <arch>/store/<h2>/<hash>/<file>
 			if seg[0] == "" {
 				return
 			}

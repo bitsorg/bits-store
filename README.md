@@ -42,10 +42,12 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `s3:ListBucket`), the index later; reads remember a hit for 10 minutes, a miss for 30
   seconds. Writers with keys of their own can still add a second file under a hash.
 - A `tarballs` binding with `"gate": "group"` (not public; for packages that may not be
-  redistributed, in a bucket of their own; needs the index) reads a build only for a
-  token whose group wrote it (its `bits-group`) or is among the binding's `readers` of
-  that group (`{"sft": ["lhcb", "atlas"]}`); anyone else gets `404`, as if it were not
-  there. Writes are as for any binding.
+  redistributed, in a bucket of their own) keeps each group's builds apart: a write is
+  filed under the token's group (`<key prefix>/<group>/<arch>/store/...`), a read finds
+  the build in the token's group, then in those that list it among their `readers`
+  (`{"sft": ["lhcb", "atlas"]}`, by name); else `404`. Groups are plain names
+  (`[a-z0-9][a-z0-9._-]*`, up to 64). Builds not under a group are not read: a gate
+  starts on an empty prefix. The collection plan leaves these builds alone.
 - `manifests` is bits' `MANIFESTS` area: the path is the key, as `blob` (the signed
   common manifests), and `GET <prefix>/rev-index/<arch>/<pkg>/<version>?revisions`
   answers `{revision: hash}` from that version's revision markers

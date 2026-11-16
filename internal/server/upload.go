@@ -130,7 +130,7 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 		u.meta = map[string]string{"sha256": "sha256:" + req.SHA256} // as bits' own writers keep it
 	}
 	if t.Grp != "" {
-		u.meta["bits-group"] = url.PathEscape(t.Grp) // its writer, for a gate (not in a listing)
+		u.meta["bits-group"] = url.PathEscape(t.Grp) // its writer (not in a listing)
 	}
 	if req.PartMD5 != nil {
 		var ok bool
@@ -267,7 +267,7 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 	staged := func(i objInfo) bool { return i.Size == u.size && i.ETag == u.md5Hex || u.fetched && marked(i) }
 	// a copy of an object in parts may get a new ETag: ours by its marker too
 	ours := func(i objInfo) bool { return staged(i) || (u.size > maxCopy || u.uploadID != "") && marked(i) }
-	// the final object's own writer: the same bytes from another group keep the first
+	// the final object's own writer: the same bytes again keep the first
 	done := func(fi objInfo) (int, string) {
 		s.uploads.markDone(id) // first: a retry must not look for the staged object
 		if s.index != nil {

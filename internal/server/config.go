@@ -73,8 +73,8 @@ type Binding struct {
 	Format    string `json:"format"`     // empty: "blob", the path is the key
 	Public    bool   `json:"public"`
 	MaxSize   int64  `json:"max_size"` // bytes a fetch may bring (Mirror formats); 0: 32 GiB
-	Gate      string `json:"gate"`     // "group": a build read only by the group that wrote it, and its readers
-	// With a gate: the groups that also read what a group wrote, {"sft": ["lhcb"]}.
+	Gate      string `json:"gate"`     // "group": each group's builds its own, read by it and its readers
+	// With a gate: the groups that also read a group's builds, {"sft": ["lhcb"]}.
 	Readers   map[string][]string `json:"readers"`
 	segs      []string
 	format    format.Format
@@ -211,8 +211,8 @@ func (c *Config) bindings() ([]Binding, error) {
 		if b.Gate != "" && (b.Gate != "group" || b.Format != "tarballs" || b.Public) {
 			return nil, fmt.Errorf("binding %q: gate is \"group\", for a tarballs binding not public", b.Prefix)
 		}
-		for w, rs := range b.Readers {
-			if b.Gate == "" || w == "" || slices.Contains(rs, "") {
+		for g, rs := range b.Readers {
+			if b.Gate == "" || !groupName.MatchString(g) || slices.ContainsFunc(rs, func(r string) bool { return !groupName.MatchString(r) }) {
 				return nil, fmt.Errorf("binding %q: readers are named groups, of a gated binding", b.Prefix)
 			}
 		}

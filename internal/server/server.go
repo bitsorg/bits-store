@@ -187,8 +187,14 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 			t = nil // a public read, without the fetch the token may not ask for
 		}
 	}
-	if key == "" && dir == "" {
-		return fail(w, http.StatusNotFound), t, p // the binding's format found nothing
+	if key == "" && dir == "" || b.Gate != "" && dir == "" {
+		return fail(w, http.StatusNotFound), t, p // the binding's format found nothing; a gate holds builds
+	}
+	if write && b.Gate != "" {
+		if !groupName.MatchString(t.Grp) {
+			return fail(w, http.StatusForbidden), t, p // no group to file it under
+		}
+		b, dir = within(b, t.Grp, dir)
 	}
 	if write {
 		if s.stores[b.Volume].Anonymous() {
@@ -200,24 +206,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		return s.answerRevisions(w, r, b, key, segs), t, p
 	}
 	if dir != "" {
-		if key, err = s.found.lookup(r.Context(), s, b, dir, now); err != nil {
+		if b.Gate != "" {
+			b, key, err = s.gatedLookup(r.Context(), b, t, dir, now)
+		} else {
+			key, err = s.found.lookup(r.Context(), s, b, dir, now)
+		}
+		if err != nil {
 			log.Printf("list %s: %v", dir, err)
 			return fail(w, http.StatusBadGateway), t, p
 		} else if key == "" {
 			return fail(w, http.StatusNotFound), t, p
 		}
-		if b.Gate != "" {
-			if ok, err := s.admits(r.Context(), b, t, key); err != nil {
-				log.Printf("gate %s: %v", key, err)
-				return fail(w, http.StatusBadGateway), t, p
-			} else if !ok {
-				return fail(w, http.StatusNotFound), t, p // refused as if not there
-			}
-		}
 		w.Header().Set("Bits-Object-Name", path.Base(key))
-	}
-	if b.Gate != "" && dir == "" {
-		return fail(w, http.StatusNotFound), t, p // a gate reads builds only
 	}
 	if b.mirror != nil && rawQuery != "" && t != nil {
 		return s.fetchRead(w, r, rawQuery, b, key, t, now), t, p

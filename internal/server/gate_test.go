@@ -6,6 +6,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bitsorg/bits-store/internal/index"
 	"github.com/bitsorg/bits-store/internal/token"
@@ -16,8 +17,8 @@ func TestGateConfig(t *testing.T) {
 	t.Setenv("TEST_SK", "s")
 	for name, ok := range map[string]bool{"group tarballs": true, " blob": true, "group blob": false,
 		"user tarballs": false, "group tarballs public": false, "group tarballs elsewhere": false,
-		"group tarballs readers": true, " tarballs readers": false, "group tarballs readers-empty": false,
-		"group tarballs readers-of-none": false, "group tarballs shared": false} {
+		"group tarballs readers": true, " tarballs readers": false, "group tarballs readers-bad": false,
+		"group tarballs readers-of-bad": false, "group tarballs shared": false} {
 		f := strings.Split(name, " ")
 		keyed := VolumeConf{Endpoint: "https://s3.example.org", Bucket: "bucket", Region: "r",
 			AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}
@@ -28,16 +29,16 @@ func TestGateConfig(t *testing.T) {
 			Volumes:  map[string]VolumeConf{"k": keyed, "alias": alias},
 			Bindings: []Binding{{Prefix: "/r", Volume: "k", KeyPrefix: "R", Format: f[1], Gate: f[0], Public: len(f) > 2 && f[2] == "public"}}}
 		switch {
-		case len(f) > 2 && f[2] == "readers":
+		case len(f) < 3:
+		case f[2] == "readers":
 			c.Bindings[0].Readers = map[string][]string{"sft": {"lhcb"}}
-		case len(f) > 2 && f[2] == "readers-empty":
-			c.Bindings[0].Readers = map[string][]string{"sft": {""}}
-		case len(f) > 2 && f[2] == "readers-of-none": // would read all of no known writer
-			c.Bindings[0].Readers = map[string][]string{"": {"cms"}}
-		case len(f) > 2 && f[2] == "shared": // the same bucket, not gated
+		case f[2] == "readers-bad":
+			c.Bindings[0].Readers = map[string][]string{"sft": {"LHCb"}}
+		case f[2] == "readers-of-bad":
+			c.Bindings[0].Readers = map[string][]string{"../x": {"cms"}}
+		case f[2] == "shared": // the same bucket, not gated
 			c.Bindings = append(c.Bindings, Binding{Prefix: "/o", Volume: "k", KeyPrefix: "O"})
-		}
-		if len(f) > 2 && f[2] == "elsewhere" { // the same bucket by another endpoint: not gated
+		case f[2] == "elsewhere": // the same bucket by another endpoint, not gated
 			c.Bindings = append(c.Bindings, Binding{Prefix: "/o", Volume: "alias", KeyPrefix: "O"})
 		}
 		if _, err := New(c); (err == nil) != ok || err != nil && !strings.Contains(err.Error(), "gate") && !strings.Contains(err.Error(), "readers") {
@@ -46,124 +47,143 @@ func TestGateConfig(t *testing.T) {
 	}
 }
 
-// gated makes the tarballs binding .../t gated; its build tarHash on x86_64-el9 is
-// stored, written by writer ("": no metadata).
-func gated(t *testing.T, writer string) (*Server, *memStore, map[string]string) {
+// gated makes the tarballs binding .../t gated (key prefix TT); the vectors' token is lhcb's.
+func gated(t *testing.T) (*Server, *memStore, string) {
 	s, tok, _ := setup(t)
 	m := newMem()
 	s.stores["s3"] = m
-	for i := range s.bindings {
-		if strings.HasSuffix(s.bindings[i].Prefix, "-opt/t") {
-			s.bindings[i].Gate = "group"
-		}
-	}
-	m.objs[tarDir+"/"+tarName] = []byte("tarball")
-	if writer != "" {
-		m.meta[tarDir+"/"+tarName] = map[string]string{"bits-group": writer}
-	}
-	return s, m, map[string]string{"Authorization": "Bearer " + tok} // group lhcb
-}
-
-func TestTheGate(t *testing.T) {
-	ctx := context.Background()
-	key := tarDir + "/" + tarName
-	for name, c := range map[string]struct {
-		writer  string // the object's metadata
-		indexed string // its index row's group; "-": no row; "none": no index
-		readers map[string][]string
-		code    int
-	}{
-		"the writer":              {"lhcb", "lhcb", nil, 302},
-		"another group":           {"atlas", "atlas", nil, 404},
-		"the writer, not indexed": {"lhcb", "-", nil, 302},
-		"the writer, not known":   {"lhcb", "", nil, 302},
-		"no writer":               {"", "", nil, 404},
-		"no writer, readers":      {"", "", map[string][]string{"atlas": {"lhcb"}}, 404},
-		"the index wins":          {"lhcb", "atlas", nil, 404},
-		"no index":                {"lhcb", "none", nil, 404},
-		"a reader":                {"atlas", "atlas", map[string][]string{"atlas": {"cms", "lhcb"}}, 302},
-		"a reader of another":     {"atlas", "atlas", map[string][]string{"cms": {"lhcb"}}, 404},
-		"not a reader":            {"atlas", "atlas", map[string][]string{"atlas": {"cms"}}, 404},
-		"readers of the reader":   {"atlas", "atlas", map[string][]string{"lhcb": {"atlas"}}, 404},
-	} {
-		s, _, auth := gated(t, c.writer)
-		gate(s).Readers = c.readers
-		if c.indexed != "none" {
-			x := withIndex(t, s)
-			if c.indexed != "-" {
-				x.Put(ctx, s.place["s3"], index.Object{Key: key, Size: 7, ETag: "e", Grp: c.indexed}, s.now())
-			}
-		}
-		for _, method := range []string{"GET", "HEAD"} {
-			w := do(s, method, tarPath, auth)
-			if w.Code != c.code || c.code == 404 && w.Header().Get("Bits-Object-Name") != "" {
-				t.Fatalf("%s %s: %d %v", name, method, w.Code, w.Header())
-			}
-		}
-	}
+	gate(s).Gate = "group"
+	return s, m, tok
 }
 
 func gate(s *Server) *Binding {
 	for i := range s.bindings {
-		if s.bindings[i].Gate != "" {
+		if strings.HasSuffix(s.bindings[i].Prefix, "-opt/t") {
 			return &s.bindings[i]
 		}
 	}
 	return nil
 }
 
-// A token without a group reads nothing gated, not even what no group wrote.
-func TestTheGateWantsAGroup(t *testing.T) {
-	s, _, _ := gated(t, "")
-	withIndex(t, s)
-	gate(s).Readers = map[string][]string{"lhcb": {"atlas"}}
-	for _, grp := range []string{"", "lhcb", "atlas"} {
-		if ok, err := s.admits(context.Background(), gate(s), &token.Token{Grp: grp}, tarDir+"/"+tarName); ok || err != nil {
-			t.Fatalf("group %q admitted: %v", grp, err)
+// the key of tarHash's build filed under group g ("": not under one)
+func filed(g string) string {
+	return strings.Replace(tarDir, "TT/", "TT/"+g+"/", 1) + "/" + tarName
+}
+
+func TestTheGateReads(t *testing.T) {
+	for name, c := range map[string]struct {
+		groups  []string // that have the build
+		readers map[string][]string
+		from    string // the group read from; "": 404
+	}{
+		"its own":              {[]string{"lhcb"}, nil, "lhcb"},
+		"another's":            {[]string{"atlas"}, nil, ""},
+		"another's, a reader":  {[]string{"atlas"}, map[string][]string{"atlas": {"cms", "lhcb"}}, "atlas"},
+		"not a reader":         {[]string{"atlas"}, map[string][]string{"atlas": {"cms"}}, ""},
+		"a reader of another":  {[]string{"atlas"}, map[string][]string{"cms": {"lhcb"}}, ""},
+		"its own first":        {[]string{"atlas", "lhcb"}, map[string][]string{"atlas": {"lhcb"}}, "lhcb"},
+		"readers, in order":    {[]string{"cms", "atlas"}, map[string][]string{"cms": {"lhcb"}, "atlas": {"lhcb"}}, "atlas"},
+		"none, under no group": {[]string{""}, nil, ""},
+	} {
+		s, m, tok := gated(t)
+		gate(s).Readers = c.readers
+		for _, g := range c.groups {
+			m.objs[strings.Replace(filed(g), "TT//", "TT/", 1)] = []byte("tarball")
+		}
+		for _, method := range []string{"GET", "HEAD"} {
+			w := do(s, method, tarPath, map[string]string{"Authorization": "Bearer " + tok})
+			if c.from == "" && (w.Code != 404 || w.Header().Get("Bits-Object-Name") != "") ||
+				c.from != "" && (w.Code != 302 || !strings.Contains(w.Header().Get("Location"), "/"+filed(c.from)+"?")) {
+				t.Fatalf("%s %s: %d %v", name, method, w.Code, w.Header())
+			}
 		}
 	}
 }
 
-// The writer read from the object is kept; a failing store is no 404.
-func TestTheGateLearnsTheWriter(t *testing.T) {
-	ctx := context.Background()
-	key := tarDir + "/" + tarName
-	s, m, auth := gated(t, "lhcb")
-	x := withIndex(t, s)
-	x.Put(ctx, s.place["s3"], index.Object{Key: key, Size: 7, ETag: m.etag(key)}, s.now())
-	if w := do(s, "GET", tarPath, auth); w.Code != 302 {
-		t.Fatalf("the writer: %d", w.Code)
+// A write is filed under its group: another group's build of the hash is no conflict,
+// nor its upload another's to complete, nor its build another's to read.
+func TestTheGateFilesWrites(t *testing.T) {
+	s, m, tok := gated(t)
+	atlas := tokenNamed(t, "grp-grants-nothing") // the same capabilities
+	m.objs[filed("atlas")] = []byte("theirs")
+	data := []byte("tarball")
+	st := startNamed(t, s, tok, tarName, data)
+	m.upload("STAGING/"+st.ID, data)
+	if w := post(s, tarPath+"?complete="+st.ID, atlas, ""); w.Code != 404 {
+		t.Fatalf("another group completes it: %d", w.Code)
 	}
-	if o, _ := indexed(t, s, "s3", key); o.Grp != "lhcb" {
-		t.Fatalf("the writer not kept: %+v", o)
+	if w := post(s, tarPath+"?complete="+st.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("complete: %d %s", w.Code, w.Body)
 	}
-	x.Put(ctx, s.place["s3"], index.Object{Key: key, Size: 7, ETag: m.etag(key)}, s.now())
-	m.statFails = key
-	if w := do(s, "GET", tarPath, auth); w.Code != 502 {
-		t.Fatalf("a failing store: %d", w.Code)
+	if string(m.objs[filed("lhcb")]) != "tarball" || m.meta[filed("lhcb")]["bits-group"] != "lhcb" {
+		t.Fatalf("not filed under its group: %v", m.objs)
 	}
-	// a row of other bytes than the object read: not its writer
-	x.Put(ctx, s.place["s3"], index.Object{Key: key, Size: 7, ETag: "other"}, s.now())
-	if w := do(s, "GET", tarPath, auth); w.Code != 302 {
-		t.Fatalf("the writer: %d", w.Code)
+	if w := post(s, tarPath+"?uploads", tok, named(tarName, data)); w.Code != 409 {
+		t.Fatalf("its own build again: %d", w.Code)
 	}
-	if o, _ := indexed(t, s, "s3", key); o.Grp != "" {
-		t.Fatalf("the writer of other bytes kept: %+v", o)
+	delete(m.objs, filed("atlas"))
+	if w := do(s, "GET", tarPath, map[string]string{"Authorization": "Bearer " + atlas}); w.Code != 404 {
+		t.Fatalf("lhcb's read by atlas: %d %v", w.Code, w.Header())
+	}
+	other := startNamed(t, s, atlas, tarName, data)
+	m.upload("STAGING/"+other.ID, data)
+	if w := post(s, tarPath+"?complete="+other.ID, atlas, ""); w.Code != 201 || m.meta[filed("atlas")]["bits-group"] != "atlas" {
+		t.Fatalf("complete: %d %v", w.Code, m.objs)
 	}
 }
 
-// A gate reads builds only: a binding naming objects by key is refused.
-func TestTheGateReadsBuildsOnly(t *testing.T) {
-	s, m, auth := gated(t, "lhcb")
-	withIndex(t, s)
+// Only a plain group name reads or writes behind a gate.
+func TestTheGateWantsAGroup(t *testing.T) {
+	s, _, _ := gated(t)
+	gate(s).Readers = map[string][]string{"atlas": {"lhcb"}}
+	for grp, want := range map[string]int{"": 0, "../x": 0, "LHCb": 0, "lhcb": 2, "cms": 1} {
+		if got := readable(gate(s), &token.Token{Grp: grp}); len(got) != want {
+			t.Fatalf("group %q reads %v", grp, got)
+		}
+	}
+	if readable(gate(s), nil) != nil {
+		t.Fatal("no token reads")
+	}
+}
+
+// The store gauges count a gated binding's builds by architecture, not by group.
+func TestGatedBuildsByArchitecture(t *testing.T) {
+	s, _, _ := gated(t)
+	x := withIndex(t, s)
+	ctx := context.Background()
+	at := s.place["s3"]
+	x.Put(ctx, at, index.Object{Key: filed("lhcb"), Size: 7, ETag: "e"}, s.now())
+	x.Put(ctx, at, index.Object{Key: "PUBT/x86_64-el9/store/01/" + tarHash + "/" + tarName, Size: 5, ETag: "e"}, s.now())
+	x.Verify(ctx, at, s.now().Add(-1), func(func(index.Object) error) error { return nil })
+	w := do(s, "GET", "/metrics", nil)
+	body := w.Body.String()
+	if !strings.Contains(body, `bits_store_bytes{volume="s3",arch="x86_64-el9"} 12`) || strings.Contains(body, `arch="lhcb"`) {
+		t.Fatalf("%d\n%s", w.Code, body)
+	}
+}
+
+// A gate holds builds only: a binding naming objects by key is refused.
+func TestTheGateHoldsBuildsOnly(t *testing.T) {
+	s, m, tok := gated(t)
 	for i := range s.bindings {
 		if s.bindings[i].Prefix == "/store/lhcb" {
 			s.bindings[i].Gate = "group"
 		}
 	}
 	m.objs["TARS/x86_64-el10-gcc14-opt/ab/h"] = []byte("x")
-	m.meta["TARS/x86_64-el10-gcc14-opt/ab/h"] = map[string]string{"bits-group": "lhcb"}
-	if w := do(s, "GET", "/store/lhcb/x86_64-el10-gcc14-opt/ab/h", auth); w.Code != 404 {
+	m.objs["TARS/lhcb/x86_64-el10-gcc14-opt/ab/h"] = []byte("x")
+	if w := do(s, "GET", "/store/lhcb/x86_64-el10-gcc14-opt/ab/h", map[string]string{"Authorization": "Bearer " + tok}); w.Code != 404 {
 		t.Fatalf("a key behind a gate: %d", w.Code)
+	}
+}
+
+// The collection plan leaves a gated binding's builds alone.
+func TestGCLeavesTheGate(t *testing.T) {
+	s, m, _, plan := gcSetup(t)
+	gate(s).Gate = "group"
+	m.objs["TT/lhcb/el9/store/bb/bb22/b-1-1.el9.tar.gz"] = []byte("theirs")
+	s.verifyDue(context.Background(), map[string]time.Time{})
+	if p := plan(); len(p.Arches) != 0 {
+		t.Fatalf("%+v", p.Arches[0])
 	}
 }

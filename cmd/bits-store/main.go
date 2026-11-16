@@ -57,11 +57,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	for _, b := range cfg.Bindings {
-		if b.Gate != "" && *data == "" {
-			log.Fatalf("binding %q: a gate needs the index (-data)", b.Prefix)
-		}
-	}
 	if *data != "" {
 		x, err := index.Open(filepath.Join(*data, "index.db"))
 		if err != nil {
