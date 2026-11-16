@@ -220,3 +220,73 @@ func (x *Index) VerifiedBy(ctx context.Context, bucket, key string) (string, err
 	}
 	return by, err
 }
+
+// Certified is what a bucket's common manifests vouch for: the first build by id
+// (among their sources) whose BOM lists each (architecture, hash), and which of
+// those builds a common manifest verified with keys (their ids) names. With keys,
+// only those count; without, every common manifest does.
+func (x *Index) Certified(ctx context.Context, bucket, keys string) (owner map[[2]string]string, signed map[string]bool, err error) {
+	owner, signed = map[[2]string]string{}, map[string]bool{}
+	rows, err := x.db.QueryContext(ctx, `WITH certified AS (
+		  SELECT DISTINCT b.build_id FROM manifests m
+		  JOIN manifest_builds b ON b.bucket = m.bucket AND b.key = m.key
+		  WHERE m.bucket = ? AND m.kind = ? AND (? = '' OR m.keys = ? AND m.verified_by != ''))
+		SELECT e.arch, e.hash, min(c.build_id) FROM manifest_entries e
+		JOIN manifests m ON m.bucket = e.bucket AND m.key = e.key AND m.kind = ?
+		JOIN manifest_builds b ON b.bucket = e.bucket AND b.key = e.key
+		JOIN certified c ON c.build_id = b.build_id
+		WHERE e.bucket = ? GROUP BY e.arch, e.hash`, bucket, KindCommon, keys, keys, KindBOM, bucket)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var arch, hash, build string
+		if err := rows.Scan(&arch, &hash, &build); err != nil {
+			return nil, nil, err
+		}
+		owner[[2]string{arch, hash}] = build
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	rows, err = x.db.QueryContext(ctx, `SELECT DISTINCT b.build_id FROM manifests m
+		JOIN manifest_builds b ON b.bucket = m.bucket AND b.key = m.key
+		WHERE m.bucket = ? AND m.kind = ? AND ? != '' AND m.keys = ? AND m.verified_by != ''`,
+		bucket, KindCommon, keys, keys)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var b string
+		if err := rows.Scan(&b); err != nil {
+			return nil, nil, err
+		}
+		signed[b] = true
+	}
+	return owner, signed, rows.Err()
+}
+
+// Each calls fn with the key and size of each of the bucket's objects under prefix
+// (a folder without its "/"; "": the bucket), in key order.
+func (x *Index) Each(ctx context.Context, bucket, prefix string, fn func(key string, size int64)) error {
+	q, args := "", []any{bucket}
+	if prefix != "" {
+		q, args = " AND key >= ? AND key < ?", []any{bucket, prefix + "/", prefix + "0"}
+	}
+	rows, err := x.db.QueryContext(ctx, `SELECT key, size FROM objects WHERE bucket = ?`+q+` ORDER BY key`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		var n int64
+		if err := rows.Scan(&k, &n); err != nil {
+			return err
+		}
+		fn(k, n)
+	}
+	return rows.Err()
+}

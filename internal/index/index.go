@@ -152,33 +152,6 @@ func (x *Index) Total(ctx context.Context, bucket string) (c Count, err error) {
 	return c, err
 }
 
-// Under groups a bucket's objects under prefix (a folder without its "/"; "": the
-// bucket) by the next segment of their keys: under a tarballs prefix, the architecture.
-func (x *Index) Under(ctx context.Context, bucket, prefix string) (map[string]Count, error) {
-	q, args := "bucket = ?", []any{1, bucket}
-	if prefix != "" { // the folder's keys: '0' follows '/'
-		q, args = "bucket = ? AND key >= ? AND key < ?", []any{len(prefix) + 2, bucket, prefix + "/", prefix + "0"}
-	}
-	rows, err := x.db.QueryContext(ctx, `SELECT seg, count(*), sum(size) FROM (
-		SELECT CASE instr(rest, '/') WHEN 0 THEN rest ELSE substr(rest, 1, instr(rest, '/') - 1) END AS seg, size
-		FROM (SELECT substr(key, ?) AS rest, size FROM objects WHERE `+q+`))
-		WHERE seg != '' GROUP BY seg`, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]Count{}
-	for rows.Next() {
-		var seg string
-		var c Count
-		if err := rows.Scan(&seg, &c.Objects, &c.Bytes); err != nil {
-			return nil, err
-		}
-		out[seg] = c
-	}
-	return out, rows.Err()
-}
-
 // Verified returns when the bucket was last verified, and what was found; ok
 // is false when it never was.
 func (x *Index) Verified(ctx context.Context, bucket string) (at time.Time, d Drift, ok bool, err error) {

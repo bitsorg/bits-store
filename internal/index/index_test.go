@@ -145,7 +145,7 @@ func TestAFailedPutIsCounted(t *testing.T) {
 	}
 }
 
-func TestTotalAndUnder(t *testing.T) {
+func TestTotal(t *testing.T) {
 	x, _ := open(t)
 	now := time.UnixMilli(1_000_000)
 	for k, n := range map[string]int64{
@@ -157,19 +157,6 @@ func TestTotalAndUnder(t *testing.T) {
 	x.Put(ctx, "other", Object{Key: "TARS/el9/z", Size: 1, ETag: "e"}, now)
 	if c, err := x.Total(ctx, "b"); err != nil || c != (Count{Objects: 7, Bytes: 1125}) {
 		t.Fatalf("total %+v, %v", c, err)
-	}
-	got, err := x.Under(ctx, "b", "TARS")
-	want := map[string]Count{"el9": {2, 11}, "el10": {1, 5}, "top": {1, 2}} // as bits' store-stats
-	if err != nil || len(got) != len(want) {
-		t.Fatalf("under %+v, %v", got, err)
-	}
-	for k, c := range want {
-		if got[k] != c {
-			t.Fatalf("under %+v, want %+v", got, want)
-		}
-	}
-	if all, err := x.Under(ctx, "b", ""); err != nil || all["TARS"] != (Count{5, 25}) || all["MANIFESTS"] != (Count{1, 1000}) {
-		t.Fatalf("under the whole bucket: %+v, %v", all, err)
 	}
 	if c, _ := x.Total(ctx, "empty"); c != (Count{}) {
 		t.Fatalf("an empty bucket: %+v", c)

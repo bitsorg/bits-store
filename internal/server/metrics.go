@@ -3,6 +3,7 @@
 package server
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"log"
@@ -35,6 +36,8 @@ var metricsDoc = [][3]string{
 	{"bits_store_bytes", "gauge", "Bytes under an architecture."},
 	{"bits_store_objects_total", "gauge", "Objects in the bucket."},
 	{"bits_store_bytes_total", "gauge", "Bytes in the bucket."},
+	{"bits_store_manifest_objects", "gauge", "Objects under an architecture by the certified build first listing them."},
+	{"bits_store_manifest_bytes", "gauge", "Bytes under an architecture by the certified build first listing them."},
 	{"bits_store_index_drift", "gauge", "What the last listing found the index to differ in."},
 	{"bits_store_index_verified_seconds", "gauge", "When the last listing began (Unix time)."},
 	{"bits_store_index_errors_total", "counter", "The service's writes the index failed to record."},
@@ -102,20 +105,8 @@ func (s *Server) collect(ctx context.Context) (map[string][]string, error) {
 		}
 		add("bits_store_objects_total", vol+"}", c.Objects)
 		add("bits_store_bytes_total", vol+"}", c.Bytes)
-		byArch := map[string][2]int64{}
-		for _, p := range tars[bucket] {
-			u, err := s.index.Under(ctx, bucket, p)
-			if err != nil {
-				return nil, err
-			}
-			for a, c := range u {
-				byArch[a] = [2]int64{byArch[a][0] + c.Objects, byArch[a][1] + c.Bytes}
-			}
-		}
-		for _, a := range slices.Sorted(maps.Keys(byArch)) {
-			l := vol + ",arch=" + quote(a) + "}"
-			add("bits_store_objects", l, byArch[a][0])
-			add("bits_store_bytes", l, byArch[a][1])
+		if err := s.collectPackages(ctx, bucket, vol, tars[bucket], add); err != nil {
+			return nil, err
 		}
 		add("bits_store_index_drift", vol+`,kind="missing"}`, d.Missing)
 		add("bits_store_index_drift", vol+`,kind="changed"}`, d.Changed)
@@ -124,4 +115,64 @@ func (s *Server) collect(ctx context.Context) (map[string][]string, error) {
 	}
 	add("bits_store_index_errors_total", "", s.index.Errors())
 	return m, nil
+}
+
+// collectPackages sums a bucket's packages (under its tarballs prefixes) by
+// architecture, and by the certified build first listing each (by architecture and
+// hash): certified by a verified common manifest, by any without manifest keys; the
+// rest is "(uncertified)". One pass, so that both splits add up to the same.
+func (s *Server) collectPackages(ctx context.Context, bucket, vol string, prefixes []string,
+	add func(name, labels string, v int64)) error {
+	owner, signed, err := s.index.Certified(ctx, bucket, s.manifestKeys.IDs())
+	if err != nil {
+		return err
+	}
+	type key struct{ build, arch string }
+	sums := map[key][2]int64{}
+	for _, p := range prefixes {
+		skip := len(p) + 1
+		if p == "" {
+			skip = 0
+		}
+		err := s.index.Each(ctx, bucket, p, func(k string, size int64) {
+			seg := strings.SplitN(k[skip:], "/", 6) // <arch>/store/<h2>/<hash>/<file>
+			if seg[0] == "" {
+				return
+			}
+			b := "(uncertified)"
+			if len(seg) >= 5 && seg[1] == "store" {
+				b = cmp.Or(owner[[2]string{seg[0], seg[3]}], b)
+			}
+			c := sums[key{b, seg[0]}]
+			sums[key{b, seg[0]}] = [2]int64{c[0] + 1, c[1] + size}
+		})
+		if err != nil {
+			return err
+		}
+	}
+	byArch := map[string][2]int64{}
+	for k, c := range sums {
+		byArch[k.arch] = [2]int64{byArch[k.arch][0] + c[0], byArch[k.arch][1] + c[1]}
+	}
+	for _, a := range slices.Sorted(maps.Keys(byArch)) {
+		l := vol + ",arch=" + quote(a) + "}"
+		add("bits_store_objects", l, byArch[a][0])
+		add("bits_store_bytes", l, byArch[a][1])
+	}
+	keys := slices.SortedFunc(maps.Keys(sums), func(a, b key) int {
+		return cmp.Or(strings.Compare(a.build, b.build), strings.Compare(a.arch, b.arch))
+	})
+	for _, k := range keys {
+		l := fmt.Sprintf("%s,manifest=%s,arch=%s,signed=\"%d\"}", vol, quote(k.build), quote(k.arch), b2i(signed[k.build]))
+		add("bits_store_manifest_objects", l, sums[k][0])
+		add("bits_store_manifest_bytes", l, sums[k][1])
+	}
+	return nil
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

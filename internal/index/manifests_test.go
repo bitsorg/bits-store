@@ -146,3 +146,33 @@ func TestAnOlderIndexIsDropped(t *testing.T) {
 		t.Fatal("the current layout dropped")
 	}
 }
+
+// A build counts when a common manifest naming it is verified with the keys now in
+// force (any common manifest, without keys); the first by id owns a shared object.
+func TestCertified(t *testing.T) {
+	x, _ := open(t)
+	now := time.UnixMilli(1_000_000)
+	for k, m := range map[string]Manifest{
+		"M/a/x.json":                  {Kind: KindBOM, Builds: []string{"release_a"}, Entries: []Entry{{"el9", "h1", "", ""}, {"el9", "h2", "", ""}}},
+		"M/b/x.json":                  {Kind: KindBOM, Builds: []string{"release_b"}, Entries: []Entry{{"el9", "h1", "", ""}}},
+		"M/c/x.json":                  {Kind: KindBOM, Builds: []string{"release_c"}, Entries: []Entry{{"el10", "h3", "", ""}}},
+		"M/common-manifest-el9.json":  {Kind: KindCommon, Builds: []string{"release_b", "release_a"}, Keys: "k1", VerifiedBy: "k1"},
+		"M/common-manifest-el10.json": {Kind: KindCommon, Builds: []string{"release_c"}, Keys: "k1"},
+	} {
+		m.Key, m.ETag, m.At = k, "e", now
+		if err := x.PutManifest(ctx, "b", m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	owner, signed, err := x.Certified(ctx, "b", "k1")
+	if err != nil || len(owner) != 2 || owner[[2]string{"el9", "h1"}] != "release_a" || owner[[2]string{"el9", "h2"}] != "release_a" ||
+		!signed["release_a"] || !signed["release_b"] || signed["release_c"] {
+		t.Fatalf("with k1: %v %v %v", owner, signed, err)
+	}
+	if owner, signed, _ := x.Certified(ctx, "b", ""); len(owner) != 3 || len(signed) != 0 {
+		t.Fatalf("without keys: %v %v", owner, signed)
+	}
+	if owner, signed, _ := x.Certified(ctx, "b", "k2"); len(owner) != 0 || len(signed) != 0 {
+		t.Fatalf("checked with keys no longer in force: %v %v", owner, signed)
+	}
+}

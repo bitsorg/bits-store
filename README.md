@@ -87,10 +87,13 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first
   segment under each `tarballs` binding's key prefix), `bits_store_objects_total`,
-  `bits_store_bytes_total`, what its last listing found (`bits_store_index_drift`,
-  `kind` missing, changed or extra) and when it began
-  (`bits_store_index_verified_seconds`); `bits_store_index_errors_total`, the writes
-  the index failed to record. Scrapes within a minute share one answer.
+  `bits_store_bytes_total`; `bits_store_manifest_objects` and `_bytes` by `manifest`,
+  `arch` and `signed`: a package goes to the first build (by id) whose BOM lists it
+  among the sources of verified common manifests (of all, without `manifest_keys`),
+  `signed` when a verified one names it, else to `(uncertified)`; what its last
+  listing found (`bits_store_index_drift`, `kind` missing, changed or extra) and when
+  it began (`bits_store_index_verified_seconds`); `bits_store_index_errors_total`,
+  the writes the index failed to record. Scrapes within a minute share one answer.
 - `access_log`: `errors` (the default) logs errors and writes, not hits; `all` every
   request; `none` no request lines. Fetches and failures are logged in any case.
 - Writes go through staging; a client never gets a URL for a final key:
