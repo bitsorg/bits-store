@@ -37,6 +37,10 @@ func main() {
 	gcOut := flag.String("gc-out", "", "with -gc: write the files that would go to this file, for review and -gc-apply")
 	gcApply := flag.String("gc-apply", "", "with -gc: delete the files this -gc-out file names that the plan, made now, still sweeps")
 	flag.Parse()
+	if flag.NArg() > 0 { // flags end at the first other word: the rest would be ignored
+		fmt.Fprintf(os.Stderr, "not a flag: %q\n", flag.Arg(0))
+		os.Exit(2)
+	}
 	if *showVersion {
 		fmt.Println(version)
 		return
