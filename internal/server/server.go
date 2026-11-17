@@ -51,6 +51,7 @@ type Server struct {
 	health      *volumeHealth
 	scrape      metricsCache
 	summary     summaryCache  // the admin API's
+	keptBy      keptCache     // the admin API's: the collection's verdicts
 	index       *index.Index  // nil: none (no -data)
 	verifyEvery time.Duration // how often a bucket is listed against the index
 

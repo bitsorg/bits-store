@@ -35,6 +35,20 @@ type GCOptions struct {
 	Out, Apply        string
 }
 
+// DefaultGC is the collection's options unless asked otherwise (bits-store -gc-*).
+var DefaultGC = GCOptions{Grace: 30 * 24 * time.Hour, Read: 30 * 24 * time.Hour, Reads: 10, KeepBuilds: 3, Max: 0.25}
+
+// Why a plan keeps a file, or sweeps it (planTree's verdict, by file).
+const (
+	WhyListed = "listed"           // a manifest or a BOM lists its hash
+	WhyUncert = "uncertified-arch" // no verified common manifest lists its architecture
+	WhyYoung  = "young"
+	WhyRead   = "read"
+	WhyNewest = "newest"
+	WhyOther  = "other" // not a package
+	WhyGoes   = "goes"
+)
+
 // GCArch is the plan for one architecture of a bucket's package tree.
 type GCArch struct {
 	Arch                                    string
@@ -50,7 +64,8 @@ type GCPlan struct {
 	Volume, Refused string
 	Arches          []*GCArch
 	bucket          string
-	mans            []string // its manifests bindings' key prefixes
+	mans            []string          // its manifests bindings' key prefixes
+	why             map[string]string // when set, planTree's verdict by key (Why*)
 }
 
 // A package file, as bits' gc.py has it: <arch>/store/<h2>/<hash>/<file>, h2 the hash's start.
@@ -152,19 +167,30 @@ func (s *Server) planTree(ctx context.Context, p *GCPlan, prefixes []string, gro
 			if grouped && !groupName.MatchString(strings.TrimSuffix(group, "/")) {
 				m = nil // not under a group: never read through the service, never swept
 			}
+			why := ""
 			switch {
 			case m == nil || !strings.HasPrefix(m[3], m[2]):
 				a.Other++
+				why = WhyOther
 			case !a.Certified || roots[strings.ToLower(m[3])]:
 				a.Kept++
 				a.KeptBytes += obj.Size
+				why = WhyUncert
+				if roots[strings.ToLower(m[3])] {
+					why = WhyListed
+				}
 			case obj.Mtime.After(oldest):
 				a.Young++
+				why = WhyYoung
 			case o.Read > 0 && obj.ReadAt.After(readSince),
 				o.Reads > 0 && obj.Reads >= int64(o.Reads) && obj.ReadAt.After(popularSince):
 				a.Read++
+				why = WhyRead
 			default:
 				a.sweep = append(a.sweep, obj)
+			}
+			if p.why != nil && why != "" {
+				p.why[obj.Key] = why
 			}
 			if m != nil && strings.HasPrefix(m[3], m[2]) { // a package; one named otherwise is its own version
 				v := prefix + "\x00" + group + cmp.Or(versionOf(arch, m), "?"+obj.Key)
@@ -181,12 +207,17 @@ func (s *Server) planTree(ctx context.Context, p *GCPlan, prefixes []string, gro
 		p.Arches = append(p.Arches, a)
 		sweep := a.sweep[:0]
 		for _, f := range a.sweep {
+			why := WhyGoes
 			if newest[f.Key] {
 				a.Newest++
+				why = WhyNewest
 			} else {
 				sweep = append(sweep, f)
 				a.Sweep++
 				a.SweepBytes += f.Size
+			}
+			if p.why != nil {
+				p.why[f.Key] = why
 			}
 		}
 		a.sweep = sweep

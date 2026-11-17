@@ -124,6 +124,18 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   totals, and each binding's objects and bytes, those read in the last 30 days, a
   `tarballs` binding's by architecture (a gated one's by group/architecture) and
   those a certified build lists (as `/metrics`); recomputed at most once a minute.
+  `GET /_admin/objects?binding=<prefix>` searches that binding's objects in the index,
+  in key order: `under` a folder (an architecture, `<group>/<arch>`, `rev-index`),
+  `q` text in the key (any case), `kind` (`bom`, `common`, or `none`: read and not a
+  manifest; a manifests binding's), written `since` or `before` (a date or RFC 3339), `kept` (a tarballs
+  binding's), `after` a key, `limit` rows (100; at most 500). Each row has the key,
+  size, ETag, write time, reads, last read, writer group; a package its architecture,
+  hash, file (and group behind a gate) and `kept`, the collection's verdict with its
+  default options, refusals aside (recomputed at most every 5 minutes): `listed` (a
+  manifest or BOM lists its hash), `uncertified-arch`, `young`, `read`, `newest`,
+  `other` (not a package) or `goes`; planned for the bucket searched, by a plan that
+  goes on when the request is given up. `next` continues it (`after`), "" at the
+  end; a search stops after looking at 100,000 rows and answers with `next`.
 - `/metrics` (with the index; Prometheus text, no token: block it in front, for the
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first

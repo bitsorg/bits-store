@@ -10,7 +10,10 @@ import (
 	"log"
 	"maps"
 	"net/http"
+	"net/url"
+	"path"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -42,7 +45,7 @@ func (s *Server) ServeAdmin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token.Token, string) {
-	p, _, _ := strings.Cut(r.RequestURI, "?")
+	p, rawQuery, _ := strings.Cut(r.RequestURI, "?")
 	if !strings.HasPrefix(p, adminPrefix) {
 		return fail(w, http.StatusNotFound), nil, p
 	}
@@ -72,6 +75,8 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 	switch p {
 	case adminPrefix + "summary":
 		return s.adminSummary(w, r), t, p
+	case adminPrefix + "objects":
+		return s.adminObjects(w, r, rawQuery), t, p
 	}
 	return fail(w, http.StatusNotFound), t, p
 }
@@ -269,4 +274,218 @@ func (s *Server) summarizeBinding(ctx context.Context, bucket string, b *Binding
 	}
 	slices.SortStableFunc(bs.By, func(a, b Tally) int { return cmp.Compare(b.Bytes, a.Bytes) })
 	return err
+}
+
+// keptCache is the collection's verdict (DefaultGC) on each package file of a bucket,
+// by key: why it stays, or that it would go. Recomputed at most every keptEvery.
+type keptCache struct {
+	mu      sync.Mutex
+	buckets map[string]*verdicts
+}
+
+// verdicts are a bucket's; its lock is held while they are planned.
+type verdicts struct {
+	mu  sync.Mutex
+	at  time.Time
+	why map[string]string
+}
+
+const (
+	keptEvery = 5 * time.Minute
+	keptTime  = 10 * time.Minute // the longest a plan for verdicts may take
+)
+
+// kept plans a bucket's packages as the collection would (refusals aside) and
+// returns the verdicts; nil for a bucket without tarballs bindings.
+func (s *Server) kept(ctx context.Context, bucket string) (map[string]string, error) {
+	c := &s.keptBy
+	c.mu.Lock()
+	if c.buckets == nil {
+		c.buckets = map[string]*verdicts{}
+	}
+	v := c.buckets[bucket]
+	if v == nil {
+		v = &verdicts{}
+		c.buckets[bucket] = v
+	}
+	c.mu.Unlock()
+	v.mu.Lock() // one plan of a bucket at a time; other buckets go on
+	defer v.mu.Unlock()
+	if v.why != nil && s.now().Sub(v.at) < keptEvery && !s.now().Before(v.at) {
+		return v.why, nil
+	}
+	var prefixes []string
+	grouped := false
+	for _, b := range s.bindings {
+		if b.Format == "tarballs" && s.place[b.Volume] == bucket && !s.stores[b.Volume].Anonymous() {
+			prefixes, grouped = append(prefixes, strings.TrimSuffix(b.KeyPrefix, "/")), b.Gate != "" // a gated bucket holds gated bindings only
+		}
+	}
+	if prefixes == nil {
+		return nil, nil
+	}
+	// the plan outlives a request given up: the next one finds it
+	pctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keptTime)
+	defer cancel()
+	var roots, certified map[string]bool
+	var err error
+	if !grouped {
+		if roots, certified, err = s.index.Roots(pctx, bucket, s.manifestKeys.IDs()); err != nil {
+			return nil, err
+		}
+	}
+	p := &GCPlan{bucket: bucket, why: map[string]string{}}
+	if err := s.planTree(pctx, p, prefixes, grouped, roots, certified, DefaultGC); err != nil {
+		return nil, err
+	}
+	v.at, v.why = s.now(), p.why
+	return p.why, nil
+}
+
+// ObjectRow is one object a search found; a package's architecture, hash and file
+// (and group behind a gate), and the collection's verdict on it.
+type ObjectRow struct {
+	Key     string     `json:"key"`
+	Size    int64      `json:"size"`
+	ETag    string     `json:"etag"`
+	Written time.Time  `json:"written"`
+	Reads   int64      `json:"reads"`
+	ReadAt  *time.Time `json:"read_at"`
+	Writer  string     `json:"writer,omitempty"` // the group whose token wrote it, when known
+	Group   string     `json:"group,omitempty"`  // the folder behind a gate
+	Arch    string     `json:"arch,omitempty"`
+	Hash    string     `json:"hash,omitempty"`
+	File    string     `json:"file,omitempty"`
+	Kept    string     `json:"kept,omitempty"`
+}
+
+const searchLimit = 500 // rows an answer holds at most
+
+var searchScan = 100000 // rows a search looks at, at most, before it answers with next
+
+// adminObjects searches one binding (?binding=<prefix>) from the index: under a
+// folder (under), by text in the key (q), manifest kind (kind), write date (since,
+// before), the collection's verdict (kept); after a key (after), limit rows. Each
+// filter is applied here, so searchScan bounds the rows looked at; the answer's next
+// continues it ("" at the end).
+func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery string) int {
+	if s.index == nil {
+		return fail(w, http.StatusNotFound)
+	}
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return failMsg(w, http.StatusBadRequest, "query")
+	}
+	var b *Binding
+	for i := range s.bindings {
+		if s.bindings[i].Prefix == q.Get("binding") {
+			b = &s.bindings[i]
+		}
+	}
+	if b == nil {
+		return failMsg(w, http.StatusNotFound, "no such binding")
+	}
+	prefix := strings.TrimSuffix(b.KeyPrefix, "/")
+	if u := q.Get("under"); u != "" {
+		if _, err := token.ParsePath("/" + u); err != nil {
+			return failMsg(w, http.StatusBadRequest, "under")
+		}
+		prefix = strings.TrimPrefix(prefix+"/"+u, "/")
+	}
+	text, after, kind, kept, limit := strings.ToLower(q.Get("q")), q.Get("after"), q.Get("kind"), q.Get("kept"), 100
+	var since, before time.Time
+	switch {
+	case len(text) > 200:
+		return failMsg(w, http.StatusBadRequest, "q")
+	case after != "" && !strings.HasPrefix(after, strings.TrimPrefix(prefix+"/", "/")):
+		return failMsg(w, http.StatusBadRequest, "after")
+	case kind != "" && (b.Format != "manifests" || !slices.Contains([]string{index.KindBOM, index.KindCommon, "none"}, kind)):
+		return failMsg(w, http.StatusBadRequest, "kind")
+	case kept != "" && (b.Format != "tarballs" || !slices.Contains(whys, kept)):
+		return failMsg(w, http.StatusBadRequest, "kept")
+	}
+	if n := q.Get("limit"); n != "" {
+		if limit, err = strconv.Atoi(n); err != nil || limit < 1 || limit > searchLimit {
+			return failMsg(w, http.StatusBadRequest, "limit")
+		}
+	}
+	for name, t := range map[string]*time.Time{"since": &since, "before": &before} {
+		if v := q.Get(name); v != "" {
+			if *t, err = parseDay(v); err != nil {
+				return failMsg(w, http.StatusBadRequest, name)
+			}
+		}
+	}
+	bucket := s.place[b.Volume]
+	var verdicts map[string]string
+	if b.Format == "tarballs" {
+		if verdicts, err = s.kept(r.Context(), bucket); err != nil {
+			log.Printf("admin objects: %v", err)
+			return fail(w, http.StatusInternalServerError)
+		}
+	}
+	rows, next, last, scanned := []ObjectRow{}, "", "", 0
+	err = s.index.Search(r.Context(), bucket, prefix, after, func(o index.Object, k string) bool {
+		if scanned++; scanned > searchScan {
+			next = last // looked at enough: the rest after it
+			return false
+		}
+		last = o.Key
+		switch {
+		case text != "" && !strings.Contains(strings.ToLower(o.Key), text),
+			!since.IsZero() && o.Mtime.Before(since), !before.IsZero() && !o.Mtime.Before(before),
+			kind != "" && k != kind,
+			kept != "" && verdicts[o.Key] != kept:
+			return true
+		}
+		row := objectRow(b, o, verdicts[o.Key])
+		if len(rows) == limit {
+			next = rows[limit-1].Key // a row more: the rest after the last one sent
+			return false
+		}
+		rows = append(rows, row)
+		return true
+	})
+	if err != nil {
+		log.Printf("admin objects: %v", err)
+		return fail(w, http.StatusInternalServerError)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(map[string]any{"objects": rows, "next": next})
+	return http.StatusOK
+}
+
+// objectRow is o of binding b as the admin API shows it, with the verdict kept.
+func objectRow(b *Binding, o index.Object, kept string) ObjectRow {
+	row := ObjectRow{Key: o.Key, Size: o.Size, ETag: o.ETag, Written: o.Mtime.UTC(), Reads: o.Reads,
+		Writer: o.Grp, Kept: kept}
+	if !o.ReadAt.IsZero() {
+		at := o.ReadAt.UTC()
+		row.ReadAt = &at
+	}
+	skip := len(strings.TrimSuffix(b.KeyPrefix, "/")) + 1
+	if b.KeyPrefix == "" {
+		skip = 0
+	}
+	if b.Format == "tarballs" && len(o.Key) > skip {
+		rest := o.Key[skip:]
+		if b.Gate != "" {
+			row.Group, rest, _ = strings.Cut(rest, "/")
+		}
+		if m := packageKey.FindStringSubmatch(rest); m != nil {
+			row.Arch, row.Hash, row.File = m[1], m[3], path.Base(rest)
+		}
+	}
+	return row
+}
+
+var whys = []string{WhyListed, WhyUncert, WhyYoung, WhyRead, WhyNewest, WhyOther, WhyGoes}
+
+// parseDay reads a date (2006-01-02, UTC) or an RFC 3339 time.
+func parseDay(v string) (time.Time, error) {
+	if t, err := time.Parse(time.DateOnly, v); err == nil {
+		return t, nil
+	}
+	return time.Parse(time.RFC3339, v)
 }

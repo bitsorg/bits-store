@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -156,5 +157,135 @@ func TestAdminSummary(t *testing.T) {
 				t.Fatalf("a gated binding by group: %+v", b)
 			}
 		}
+	}
+}
+
+// Searching a binding: every object once across pages, narrowed by text, folder,
+// verdict, kind and date; the collection's verdict on each package.
+func TestAdminObjects(t *testing.T) {
+	s, m, x, _ := gcSetup(t)
+	ctx := context.Background()
+	at := s.place["s3"]
+	bom := "MM/release_x-1/a.el9.json"
+	m.objs[bom] = []byte(`{"build_id": "release_x-1", "packages": [{"hash": "aa", "effective_architecture": "el9"}]}`)
+	x.Put(ctx, at, index.Object{Key: bom, Size: int64(len(m.objs[bom])), ETag: m.etag(bom), Mtime: s.now()}, s.now())
+	s.readManifests(ctx)
+	auth := map[string]string{"Authorization": "Bearer " + adminToken(t, s, "admin:alice", time.Minute, "GET /_admin/**")}
+	tars, mans := "/store/lhcb/x86_64-el10-gcc14-opt/t", "/store/lhcb/x86_64-el10-gcc14-opt/m"
+	get := func(code int, query string) (rows []ObjectRow, next string) {
+		t.Helper()
+		w := doAdmin(s, "GET", "/_admin/objects?"+query, auth)
+		if w.Code != code {
+			t.Fatalf("%s: want %d, got %d %s", query, code, w.Code, w.Body)
+		}
+		var a struct {
+			Objects []ObjectRow
+			Next    string
+		}
+		if code == 200 {
+			if err := json.Unmarshal(w.Body.Bytes(), &a); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return a.Objects, a.Next
+	}
+	keys := func(rows []ObjectRow) string {
+		var k []string
+		for _, r := range rows {
+			k = append(k, strings.TrimPrefix(r.Key, "TT/"))
+		}
+		return strings.Join(k, " ")
+	}
+	all, next := get(200, "binding="+url.QueryEscape(tars))
+	verdict := map[string]string{}
+	for _, r := range all {
+		verdict[strings.TrimPrefix(r.Key, "TT/")] = r.Kept
+	}
+	if len(all) != 10 || next != "" || verdict["el9/store/aa/aa/a-1-1.el9.tar.gz"] != WhyListed ||
+		verdict["el9/store/bb/bb22/b-1-1.el9.tar.gz"] != WhyNewest || verdict["el9/store/cc/cc33/c-1-1.el9.tar.gz"] != WhyYoung ||
+		verdict["el10/store/dd/dd44/d-1-1.el10.tar.gz"] != WhyUncert || verdict["el9/dist/x"] != WhyOther {
+		t.Fatalf("%v %q", verdict, next)
+	}
+	for _, r := range all {
+		if strings.HasSuffix(r.Key, "/b-1-1.el9.tar.gz") && (r.Arch != "el9" || r.Hash != "bb22" || r.File != "b-1-1.el9.tar.gz") {
+			t.Fatalf("not parsed: %+v", r)
+		}
+	}
+	var paged []ObjectRow
+	for after := ""; ; {
+		rows, n := get(200, "limit=3&binding="+url.QueryEscape(tars)+"&after="+url.QueryEscape(after))
+		paged = append(paged, rows...)
+		if n == "" {
+			break
+		}
+		after = n
+	}
+	if keys(paged) != keys(all) {
+		t.Fatalf("pages:\n%s\nall:\n%s", keys(paged), keys(all))
+	}
+	scan := searchScan
+	defer func() { searchScan = scan }()
+	searchScan = 2 // a search that looks at 2 rows: young ones found across answers
+	var young []ObjectRow
+	for after, n := "", 0; n < 10; n++ {
+		rows, next := get(200, "kept=young&binding="+url.QueryEscape(tars)+"&after="+url.QueryEscape(after))
+		young = append(young, rows...)
+		if next == "" {
+			break
+		}
+		after = next
+	}
+	searchScan = scan
+	if keys(young) != "el9/store/cc/cc33/c-1-1.el9.tar.gz" {
+		t.Fatalf("scanned in parts: %q", keys(young))
+	}
+	for query, want := range map[string]string{
+		"q=B-1-1":          "el9/store/bb/bb22/b-1-1.el9.tar.gz",
+		"q=%25":            "",
+		"kept=young":       "el9/store/cc/cc33/c-1-1.el9.tar.gz",
+		"under=el10":       "el10/store/dd/dd44/d-1-1.el10.tar.gz",
+		"under=el9/dist":   "el9/dist/x",
+		"since=2100-01-01": "",
+	} {
+		if rows, _ := get(200, query+"&binding="+url.QueryEscape(tars)); keys(rows) != want {
+			t.Errorf("%s: %q", query, keys(rows))
+		}
+	}
+	before := "before=" + url.QueryEscape(s.now().Add(-2*time.Hour).Format(time.RFC3339)) + "&binding=" + url.QueryEscape(tars)
+	if rows, _ := get(200, before); len(rows) != 9 || strings.Contains(keys(rows), "c-1-1") {
+		t.Errorf("before: %q", keys(rows))
+	}
+	if rows, _ := get(200, "kind=common&binding="+url.QueryEscape(mans)); keys(rows) != "MM/common-manifest-el9.json" {
+		t.Errorf("common manifests: %q", keys(rows))
+	}
+	if rows, _ := get(200, "kind=bom&binding="+url.QueryEscape(mans)); keys(rows) != bom {
+		t.Errorf("BOMs: %q", keys(rows))
+	}
+	for _, query := range []string{"kind=bom&binding=" + url.QueryEscape(tars), "kept=young&binding=" + url.QueryEscape(mans),
+		"limit=0&binding=" + url.QueryEscape(tars), "limit=501&binding=" + url.QueryEscape(tars),
+		"under=../x&binding=" + url.QueryEscape(tars), "after=MM/x&binding=" + url.QueryEscape(tars),
+		"since=yesterday&binding=" + url.QueryEscape(tars), "kept=gone&binding=" + url.QueryEscape(tars)} {
+		get(400, query)
+	}
+	if rows, _ := get(200, "kind=none&binding="+url.QueryEscape(mans)); keys(rows) != "" {
+		t.Errorf("kind none: %q", keys(rows))
+	}
+	gone, cancel := context.WithCancel(ctx) // a plan for verdicts outlives its request
+	cancel()
+	s.keptBy = keptCache{}
+	if why, err := s.kept(gone, at); err != nil || why["TT/el9/store/cc/cc33/c-1-1.el9.tar.gz"] != WhyYoung {
+		t.Errorf("verdicts for a request given up: %v %v", why, err)
+	}
+	if why, err := s.kept(ctx, s.place["pub"]); why != nil || err != nil {
+		t.Errorf("a bucket without packages: %v %v", why, err)
+	}
+	x.Put(ctx, at, index.Object{Key: "TT/el9/Über-README", Size: 1, ETag: "u"}, s.now())
+	if rows, _ := get(200, "q="+url.QueryEscape("über-readme")+"&binding="+url.QueryEscape(tars)); keys(rows) != "el9/Über-README" {
+		t.Errorf("any case: %q", keys(rows))
+	}
+	get(404, "binding=/nowhere")
+	only := map[string]string{"Authorization": "Bearer " + adminToken(t, s, "admin:bob", time.Minute, "GET /_admin/summary")}
+	if w := doAdmin(s, "GET", "/_admin/objects?binding="+url.QueryEscape(tars), only); w.Code != 403 {
+		t.Errorf("a token for the summary alone: %d", w.Code)
 	}
 }

@@ -286,6 +286,43 @@ func (x *Index) Tally(ctx context.Context, bucket, prefix string, since time.Tim
 	return c, read, err
 }
 
+// Search calls fn with the bucket's objects under prefix (as Each) after a key, in
+// key order, with their SHA-256, writer group and manifest kind ("" when not read as
+// one), until fn returns false.
+func (x *Index) Search(ctx context.Context, bucket, prefix, after string, fn func(o Object, kind string) bool) error {
+	where, args := "", []any{bucket}
+	if prefix != "" {
+		where, args = " AND o.key >= ? AND o.key < ?", append(args, prefix+"/", prefix+"0")
+	}
+	if after != "" {
+		where, args = where+" AND o.key > ?", append(args, after)
+	}
+	rows, err := x.db.QueryContext(ctx, `SELECT o.key, o.size, o.etag, o.mtime, coalesce(o.sha256, ''), o.reads,
+		o.read_at, o.grp, coalesce(m.kind, '') FROM objects o
+		LEFT JOIN manifests m ON m.bucket = o.bucket AND m.key = o.key
+		WHERE o.bucket = ?`+where+` ORDER BY o.key`, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var o Object
+		var mtime, readAt int64
+		var kind string
+		if err := rows.Scan(&o.Key, &o.Size, &o.ETag, &mtime, &o.SHA256, &o.Reads, &readAt, &o.Grp, &kind); err != nil {
+			return err
+		}
+		o.Mtime = time.UnixMilli(mtime)
+		if readAt > 0 {
+			o.ReadAt = time.UnixMilli(readAt)
+		}
+		if !fn(o, kind) {
+			break
+		}
+	}
+	return rows.Err()
+}
+
 // Each calls fn with each of the bucket's objects under prefix (a folder without
 // its "/"; "": the bucket), in key order; their SHA-256 is not read.
 func (x *Index) Each(ctx context.Context, bucket, prefix string, fn func(Object)) error {
