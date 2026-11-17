@@ -346,11 +346,13 @@ func fileOptions(o GCOptions) gcFileOptions {
 }
 
 type gcFileEntry struct {
-	Volume string `json:"volume"`
-	Bucket string `json:"bucket"` // the volume's endpoint and bucket
-	Key    string `json:"key"`
-	Size   int64  `json:"size"`
-	ETag   string `json:"etag"`
+	Volume string    `json:"volume"`
+	Bucket string    `json:"bucket"` // the volume's endpoint and bucket
+	Key    string    `json:"key"`
+	Size   int64     `json:"size"`
+	ETag   string    `json:"etag"`
+	Reads  int64     `json:"reads"`   // as planned: a read since keeps it
+	ReadAt time.Time `json:"read_at"` // zero: none
 }
 
 // gcPlanLife is how old a plan file -gc-apply takes may be.
@@ -363,7 +365,7 @@ func writeGCFile(name string, plans []*GCPlan, o GCOptions, now time.Time) error
 		for _, a := range p.Arches {
 			for _, obj := range a.sweep {
 				if p.Refused == "" {
-					f.Files = append(f.Files, gcFileEntry{p.Volume, p.bucket, obj.Key, obj.Size, obj.ETag})
+					f.Files = append(f.Files, gcFileEntry{p.Volume, p.bucket, obj.Key, obj.Size, obj.ETag, obj.Reads, obj.ReadAt})
 				}
 			}
 		}
@@ -486,7 +488,7 @@ func (s *Server) ApplyGC(ctx context.Context, plans []*GCPlan, o GCOptions, name
 			keep(e, "the index: "+err.Error())
 			code = 1
 			continue
-		} else if ok && (row.Reads != planned.Reads || !row.ReadAt.Equal(planned.ReadAt)) {
+		} else if ok && (row.Reads != e.Reads || !row.ReadAt.Equal(e.ReadAt)) {
 			keep(e, "read since planned")
 			continue
 		}

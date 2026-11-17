@@ -141,8 +141,8 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   manifest outside the bindings that cannot be read, one inside or its `.sig` in the
   store not as the index read it, reads counted for less than `-gc-read`, or more than
   `-gc-max` (0.25) of an architecture's packages to go. It deletes nothing: `-gc-out
-  FILE` writes the files that may go now (volume, bucket, key, size, ETag; none of a
-  refused volume) and the options, for review; `-gc-apply FILE` (with the same
+  FILE` writes the files that may go now (volume, bucket, key, size, ETag, reads; none
+  of a refused volume) and the options, for review; `-gc-apply FILE` (with the same
   options, within 7 days) plans again and deletes those of them it still sweeps, as
   planned in the index and in the bucket (size and ETag, a HEAD each), not read since
   nor listed by a manifest since (checked again every 30 seconds as it goes, the

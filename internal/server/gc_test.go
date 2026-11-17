@@ -428,14 +428,14 @@ func TestGCApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := read()
-	if len(f.Files) != 1 || f.Files[0] != (gcFileEntry{"s3", s.place["s3"], gone, 3, m.etag(gone)}) {
+	if len(f.Files) != 1 || f.Files[0] != (gcFileEntry{"s3", s.place["s3"], gone, 3, m.etag(gone), 0, time.Time{}}) {
 		t.Fatalf("%+v", f)
 	}
 	planned := f.Files[0]
 	// what the reviewer was not shown: a root, an uncertified architecture's, another ETag
-	f.Files = append(f.Files, gcFileEntry{"s3", s.place["s3"], "TT/el9/store/aa/aa/a-1-1.el9.tar.gz", 9, "e"},
-		gcFileEntry{"s3", s.place["s3"], "TT/el10/store/dd/dd44/d-1-1.el10.tar.gz", 15, m.etag("TT/el10/store/dd/dd44/d-1-1.el10.tar.gz")},
-		gcFileEntry{"s3", s.place["s3"], gone, 3, "another"})
+	f.Files = append(f.Files, gcFileEntry{"s3", s.place["s3"], "TT/el9/store/aa/aa/a-1-1.el9.tar.gz", 9, "e", 0, time.Time{}},
+		gcFileEntry{"s3", s.place["s3"], "TT/el10/store/dd/dd44/d-1-1.el10.tar.gz", 15, m.etag("TT/el10/store/dd/dd44/d-1-1.el10.tar.gz"), 0, time.Time{}},
+		gcFileEntry{"s3", s.place["s3"], gone, 3, "another", 0, time.Time{}})
 	write(f)
 	if code, out := apply(nil); code != 0 || !m.has(gone) {
 		t.Fatalf("no plan now, yet deleted: %d %s", code, out)
@@ -461,6 +461,13 @@ func TestGCApply(t *testing.T) {
 	x.AddReads(ctx, map[[2]string]index.Read{{s.place["s3"], gone}: {N: 1, Last: s.now()}})
 	if _, out := apply(plans); !m.has(gone) || !strings.Contains(out, "read since planned") {
 		t.Fatalf("a file read since deleted: %s", out)
+	}
+	// read between the plan file and the plan made to apply it (no -gc-read rule)
+	if _, out := apply(mustPlan(t, s, o)); !m.has(gone) || !strings.Contains(out, "read since planned") {
+		t.Fatalf("a file read since the plan file deleted: %s", out)
+	}
+	if err := writeGCFile(file, mustPlan(t, s, o), o, s.now()); err != nil { // with that read
+		t.Fatal(err)
 	}
 	// a bucket that cannot answer: exit 1
 	plans = mustPlan(t, s, o)
