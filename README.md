@@ -136,6 +136,12 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `other` (not a package) or `goes`; planned for the bucket searched, by a plan that
   goes on when the request is given up. `next` continues it (`after`), "" at the
   end; a search stops after looking at 100,000 rows and answers with `next`.
+  `GET /_admin/object?binding=<prefix>&key=<key>`: one object as a search shows it,
+  with its SHA-256 (when the service wrote it), whether the bucket holds it and its
+  user metadata there (a HEAD; `in_bucket` null when the bucket does not answer); a
+  package's `listed_by` (each BOM and common manifest listing its hash under its
+  architecture, the builds it names, whether one of `manifest_keys` verifies it); a
+  manifest's `kind` and `builds`.
 - `/metrics` (with the index; Prometheus text, no token: block it in front, for the
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first

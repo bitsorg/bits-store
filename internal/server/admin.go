@@ -77,6 +77,8 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 		return s.adminSummary(w, r), t, p
 	case adminPrefix + "objects":
 		return s.adminObjects(w, r, rawQuery), t, p
+	case adminPrefix + "object":
+		return s.adminObject(w, r, rawQuery), t, p
 	}
 	return fail(w, http.StatusNotFound), t, p
 }
@@ -376,12 +378,7 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery s
 	if err != nil {
 		return failMsg(w, http.StatusBadRequest, "query")
 	}
-	var b *Binding
-	for i := range s.bindings {
-		if s.bindings[i].Prefix == q.Get("binding") {
-			b = &s.bindings[i]
-		}
-	}
+	b := s.binding(q.Get("binding"))
 	if b == nil {
 		return failMsg(w, http.StatusNotFound, "no such binding")
 	}
@@ -488,4 +485,87 @@ func parseDay(v string) (time.Time, error) {
 		return t, nil
 	}
 	return time.Parse(time.RFC3339, v)
+}
+
+// ObjectDetail is one object: as a search shows it, with its SHA-256; its metadata
+// in the bucket (a HEAD); a package's manifests (BOMs and common manifests listing
+// its hash); a manifest's kind and builds, as the index read them.
+type ObjectDetail struct {
+	ObjectRow
+	SHA256   string            `json:"sha256,omitempty"`
+	InBucket *bool             `json:"in_bucket"`           // nil: the bucket did not answer
+	Meta     map[string]string `json:"meta,omitempty"`      // its user metadata there (bits-group, bits-signature, sha256, ...)
+	ListedBy []index.Listing   `json:"listed_by,omitempty"` // a package's
+	Kind     string            `json:"kind,omitempty"`      // a manifest's: bom, common, none
+	Builds   []string          `json:"builds,omitempty"`    // a BOM's build, a common manifest's sources
+}
+
+// adminObject answers one object of a binding (?binding=<prefix>&key=<key>).
+func (s *Server) adminObject(w http.ResponseWriter, r *http.Request, rawQuery string) int {
+	if s.index == nil {
+		return fail(w, http.StatusNotFound)
+	}
+	q, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return failMsg(w, http.StatusBadRequest, "query")
+	}
+	b := s.binding(q.Get("binding"))
+	key := q.Get("key")
+	if b == nil {
+		return failMsg(w, http.StatusNotFound, "no such binding")
+	}
+	if p := strings.TrimSuffix(b.KeyPrefix, "/"); p != "" && !strings.HasPrefix(key, p+"/") || key == "" {
+		return failMsg(w, http.StatusBadRequest, "key")
+	}
+	ctx, bucket := r.Context(), s.place[b.Volume]
+	o, ok, err := s.index.Get(ctx, bucket, key)
+	if err != nil {
+		log.Printf("admin object: %v", err)
+		return fail(w, http.StatusInternalServerError)
+	} else if !ok {
+		return fail(w, http.StatusNotFound)
+	}
+	o.Key = key
+	var verdicts map[string]string
+	if b.Format == "tarballs" {
+		if verdicts, err = s.kept(ctx, bucket); err != nil {
+			log.Printf("admin object: %v", err)
+			return fail(w, http.StatusInternalServerError)
+		}
+	}
+	d := ObjectDetail{ObjectRow: objectRow(b, o, verdicts[key]), SHA256: o.SHA256}
+	if d.Hash != "" {
+		if d.ListedBy, err = s.index.ListedBy(ctx, bucket, d.Arch, d.Hash, s.manifestKeys.IDs()); err != nil {
+			log.Printf("admin object: %v", err)
+			return fail(w, http.StatusInternalServerError)
+		}
+	}
+	if b.Format == "manifests" {
+		if d.Kind, d.Builds, err = s.index.Builds(ctx, bucket, key); err != nil {
+			log.Printf("admin object: %v", err)
+			return fail(w, http.StatusInternalServerError)
+		}
+	}
+	sctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	fi, found, err := s.stores[b.Volume].Stat(sctx, key)
+	cancel()
+	if err != nil {
+		log.Printf("admin object: stat %s: %v", key, err) // shown as not known: nil
+	} else {
+		d.InBucket, d.Meta = &found, fi.Meta
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(d)
+	return http.StatusOK
+}
+
+// binding is the binding of exactly that prefix, nil when none.
+func (s *Server) binding(prefix string) *Binding {
+	for i := range s.bindings {
+		if s.bindings[i].Prefix == prefix {
+			return &s.bindings[i]
+		}
+	}
+	return nil
 }

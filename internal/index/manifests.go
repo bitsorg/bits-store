@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path"
+	"slices"
 	"strings"
 	"time"
 )
@@ -321,6 +322,43 @@ func (x *Index) Search(ctx context.Context, bucket, prefix, after string, fn fun
 		}
 	}
 	return rows.Err()
+}
+
+// Listing is a manifest listing a package: its key, kind, the builds it names, and
+// whether one of the manifest keys verifies it (a common manifest's .sig).
+type Listing struct {
+	Key      string   `json:"key"`
+	Kind     string   `json:"kind"`   // bom or common
+	Builds   []string `json:"builds"` // a BOM's build, a common manifest's sources
+	Verified bool     `json:"verified"`
+}
+
+// ListedBy is the manifests (BOMs, common manifests) listing the hash of arch, by
+// key; verified with keys (their ids), as Roots.
+func (x *Index) ListedBy(ctx context.Context, bucket, arch, hash, keys string) ([]Listing, error) {
+	rows, err := x.db.QueryContext(ctx, `SELECT e.key, m.kind, ? != '' AND m.keys = ? AND m.verified_by != '',
+		  (SELECT json_group_array(build_id) FROM manifest_builds b WHERE b.bucket = e.bucket AND b.key = e.key)
+		FROM manifest_entries e JOIN manifests m ON m.bucket = e.bucket AND m.key = e.key
+		WHERE e.bucket = ? AND e.arch = ? AND e.hash = ? ORDER BY e.key`,
+		keys, keys, bucket, arch, strings.ToLower(hash))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Listing
+	for rows.Next() {
+		var l Listing
+		var builds string
+		if err := rows.Scan(&l.Key, &l.Kind, &l.Verified, &builds); err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal([]byte(builds), &l.Builds); err != nil {
+			return nil, err
+		}
+		slices.Sort(l.Builds)
+		out = append(out, l)
+	}
+	return out, rows.Err()
 }
 
 // Each calls fn with each of the bucket's objects under prefix (a folder without

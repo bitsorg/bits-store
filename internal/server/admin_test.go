@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"net/url"
 	"strings"
@@ -288,4 +289,62 @@ func TestAdminObjects(t *testing.T) {
 	if w := doAdmin(s, "GET", "/_admin/objects?binding="+url.QueryEscape(tars), only); w.Code != 403 {
 		t.Errorf("a token for the summary alone: %d", w.Code)
 	}
+}
+
+// One object: the index's row, the manifests listing a package, a manifest's
+// builds, and the bucket's metadata (unknown when the bucket does not answer).
+func TestAdminObject(t *testing.T) {
+	s, m, x, _ := gcSetup(t)
+	ctx := context.Background()
+	bom := "MM/release_x-1/a.el9.json"
+	m.objs[bom] = []byte(`{"build_id": "release_x-1", "packages": [{"hash": "aa", "effective_architecture": "el9"}]}`)
+	x.Put(ctx, s.place["s3"], index.Object{Key: bom, Size: int64(len(m.objs[bom])), ETag: m.etag(bom), Mtime: s.now()}, s.now())
+	s.readManifests(ctx)
+	auth := map[string]string{"Authorization": "Bearer " + adminToken(t, s, "admin:alice", time.Minute, "GET /_admin/**")}
+	tars, mans := "/store/lhcb/x86_64-el10-gcc14-opt/t", "/store/lhcb/x86_64-el10-gcc14-opt/m"
+	get := func(code int, binding, key string) ObjectDetail {
+		t.Helper()
+		w := doAdmin(s, "GET", "/_admin/object?binding="+url.QueryEscape(binding)+"&key="+url.QueryEscape(key), auth)
+		var d ObjectDetail
+		if w.Code != code || code == 200 && json.Unmarshal(w.Body.Bytes(), &d) != nil {
+			t.Fatalf("%s: want %d, got %d %s", key, code, w.Code, w.Body)
+		}
+		return d
+	}
+	a := "TT/el9/store/aa/aa/a-1-1.el9.tar.gz"
+	m.meta[a] = map[string]string{"bits-group": "lhcb"}
+	d := get(200, tars, a)
+	listed := map[string]index.Listing{}
+	for _, l := range d.ListedBy {
+		listed[l.Key] = l
+	}
+	if d.Kept != WhyListed || d.Arch != "el9" || d.Hash != "aa" || d.InBucket == nil || !*d.InBucket || d.Meta["bits-group"] != "lhcb" ||
+		fmt.Sprint(listed[bom]) != fmt.Sprint(index.Listing{Key: bom, Kind: index.KindBOM, Builds: []string{"release_x-1"}}) ||
+		fmt.Sprint(listed["MM/common-manifest-el9.json"]) != fmt.Sprint(index.Listing{Key: "MM/common-manifest-el9.json",
+			Kind: index.KindCommon, Builds: []string{"release_x-1"}, Verified: true}) || len(d.ListedBy) != 2 {
+		t.Fatalf("%+v", d)
+	}
+	keys := s.manifestKeys
+	s.manifestKeys = index.Keys{} // verified by no key in force now
+	for _, l := range get(200, tars, a).ListedBy {
+		if l.Verified {
+			t.Errorf("verified without manifest_keys: %+v", l)
+		}
+	}
+	s.manifestKeys = keys
+	if d := get(200, mans, "MM/common-manifest-el9.json"); d.Kind != index.KindCommon || strings.Join(d.Builds, " ") != "release_x-1" || d.ListedBy != nil {
+		t.Fatalf("a common manifest: %+v", d)
+	}
+	delete(m.objs, a)
+	if d := get(200, tars, a); d.InBucket == nil || *d.InBucket {
+		t.Fatalf("gone from the bucket: %+v", d.InBucket)
+	}
+	m.statFails = a
+	if d := get(200, tars, a); d.InBucket != nil || d.Kept != WhyListed {
+		t.Fatalf("a bucket that does not answer: %+v", d)
+	}
+	get(400, tars, "MM/common-manifest-el9.json")
+	get(400, tars, "")
+	get(404, tars, "TT/el9/store/zz/zz/none")
+	get(404, "/nowhere", a)
 }
