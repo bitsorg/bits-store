@@ -77,7 +77,10 @@ type Binding struct {
 	MaxSize   int64  `json:"max_size"` // bytes a fetch may bring (Mirror formats); 0: 32 GiB
 	Gate      string `json:"gate"`     // "group": each group's builds its own, read by it and its readers
 	// With a gate: the groups that also read a group's builds, {"sft": ["lhcb"]}.
-	Readers   map[string][]string `json:"readers"`
+	Readers map[string][]string `json:"readers"`
+	// With a gate: builds withdrawn, by their sha256 ("sha256:<hex>"): not read, nor stored again.
+	Deny      []string `json:"deny"`
+	deny      map[string]bool
 	segs      []string
 	format    format.Format
 	mirror    format.Mirror    // the format, when it fetches what is missing
@@ -217,6 +220,13 @@ func (c *Config) bindings() ([]Binding, error) {
 			if b.Gate == "" || !groupName.MatchString(g) || slices.ContainsFunc(rs, func(r string) bool { return !groupName.MatchString(r) }) {
 				return nil, fmt.Errorf("binding %q: readers are named groups, of a gated binding", b.Prefix)
 			}
+		}
+		b.deny = map[string]bool{}
+		for _, d := range b.Deny {
+			if b.Gate == "" || !strings.HasPrefix(d, "sha256:") || !sha256Hex.MatchString(d[len("sha256:"):]) {
+				return nil, fmt.Errorf("binding %q: deny is sha256:<lower-case hex> of a gated binding's builds", b.Prefix)
+			}
+			b.deny[d] = true
 		}
 		if at, ok := gated[vol.Bucket]; ok && (at != where(vol) || b.Gate == "") {
 			return nil, fmt.Errorf("binding %q: bucket %q is a gated binding's, for gated bindings only", b.Prefix, vol.Bucket)

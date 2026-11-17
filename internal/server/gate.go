@@ -38,16 +38,31 @@ func readable(b *Binding, t *token.Token) []string {
 	return out
 }
 
-// gatedLookup finds the build in dir among the groups t reads, in that order: the
-// binding as that group has it, the object and the group; "" when none has it.
+// gatedLookup finds the build in dir among the groups t reads, in that order (a
+// denied one passed over): the binding as that group has it, the object and the
+// group; "" when none has it.
 func (s *Server) gatedLookup(ctx context.Context, b *Binding, t *token.Token, dir string, now time.Time) (*Binding, string, string, error) {
 	for _, g := range readable(b, t) {
 		gb, gdir := within(b, g, dir)
-		if key, err := s.found.lookup(ctx, s, gb, gdir, now); err != nil || key != "" {
+		key, err := s.found.lookup(ctx, s, gb, gdir, now)
+		if err == nil && key != "" && len(b.deny) > 0 {
+			key, err = s.notDenied(ctx, b, key)
+		}
+		if err != nil || key != "" {
 			return gb, key, g, err
 		}
 	}
 	return b, "", "", nil
+}
+
+// notDenied is key, or "" when the build there is one the binding denies (its
+// sha256 as stored, what its signature covers) or gone.
+func (s *Server) notDenied(ctx context.Context, b *Binding, key string) (string, error) {
+	fi, ok, err := s.stores[b.Volume].Stat(ctx, key)
+	if err != nil || !ok || b.deny[fi.Meta["sha256"]] {
+		return "", err
+	}
+	return key, nil
 }
 
 // grouped says whether a tarballs prefix of the bucket at is a gated binding's,

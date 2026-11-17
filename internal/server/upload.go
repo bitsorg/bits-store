@@ -151,6 +151,9 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 	if left < minTokenLeft {
 		return failMsg(w, http.StatusUnauthorized, "token-expiring")
 	}
+	if b.deny["sha256:"+req.SHA256] {
+		return failMsg(w, http.StatusForbidden, "denied") // withdrawn: never signed again
+	}
 	st := s.stores[b.Volume]
 	if _, exists, err := st.Stat(r.Context(), key); err != nil {
 		log.Printf("stat %s: %v", key, err)
@@ -221,6 +224,10 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, b *Bindi
 	u := s.uploads.claim(id, b.Volume, at, t.Sub, now)
 	if u == nil {
 		return fail(w, http.StatusNotFound)
+	}
+	if b.deny["sha256:"+u.sha256] && !s.uploads.isDone(id) {
+		s.uploads.expire(id) // its staging object removed with the expired ones
+		return failMsg(w, http.StatusForbidden, "denied")
 	}
 	http.NewResponseController(w).SetWriteDeadline(time.Now().Add(completeTime(u.size)))
 	if u.uploadID != "" && !s.uploads.isDone(id) {
@@ -435,6 +442,14 @@ func (ut *uploadTable) markDone(id string) {
 	defer ut.mu.Unlock()
 	if u := ut.m[id]; u != nil {
 		u.done = true
+	}
+}
+
+func (ut *uploadTable) expire(id string) {
+	ut.mu.Lock()
+	defer ut.mu.Unlock()
+	if u := ut.m[id]; u != nil {
+		u.expires = time.Time{}
 	}
 }
 

@@ -24,7 +24,7 @@ func TestGateConfig(t *testing.T) {
 		"user tarballs": false, "group tarballs public": false, "group tarballs elsewhere": false,
 		"group tarballs readers": true, " tarballs readers": false, "group tarballs readers-bad": false,
 		"group tarballs readers-of-bad": false, "group tarballs shared": false, "group tarballs unsigned": false,
-		" tarballs unsigned": true} {
+		" tarballs unsigned": true, "group tarballs deny": true, " tarballs deny": false, "group tarballs deny-bad": false, "group tarballs deny-short": false} {
 		f := strings.Split(name, " ")
 		keyed := VolumeConf{Endpoint: "https://s3.example.org", Bucket: "bucket", Region: "r",
 			AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}
@@ -45,6 +45,12 @@ func TestGateConfig(t *testing.T) {
 			c.Bindings[0].Readers = map[string][]string{"../x": {"cms"}}
 		case f[2] == "unsigned":
 			c.RestrictedSigner = SignerConf{}
+		case f[2] == "deny":
+			c.Bindings[0].Deny = []string{"sha256:" + strings.Repeat("ab", 32)}
+		case f[2] == "deny-bad":
+			c.Bindings[0].Deny = []string{strings.Repeat("ab", 32)}
+		case f[2] == "deny-short":
+			c.Bindings[0].Deny = []string{"sha256:AB"}
 		case f[2] == "shared": // the same bucket, not gated
 			c.Bindings = append(c.Bindings, Binding{Prefix: "/o", Volume: "k", KeyPrefix: "O"})
 		case f[2] == "elsewhere": // the same bucket by another endpoint, not gated
@@ -289,5 +295,57 @@ func TestTheGateSignsItsBuilds(t *testing.T) {
 	m.upload("STAGING/"+st.ID, other)
 	if w := post(s, final+"?complete="+st.ID, tok, ""); w.Code != 201 || m.meta[finalKey]["bits-signature"] != "" || g.signed.Load() != 1 {
 		t.Fatalf("an ungated build signed: %d %v", w.Code, m.meta[finalKey])
+	}
+}
+
+// A denied build (by its sha256) is not read, nor stored again, nor completed once denied.
+func TestTheGateDenies(t *testing.T) {
+	s, m, tok := gated(t)
+	data := []byte("tarball")
+	sum := sha256.Sum256(data)
+	denied := "sha256:" + hex.EncodeToString(sum[:])
+	m.objs[filed("lhcb")], m.meta[filed("lhcb")] = data, map[string]string{"sha256": denied}
+	auth := map[string]string{"Authorization": "Bearer " + tok}
+	if w := do(s, "GET", tarPath, auth); w.Code != 302 {
+		t.Fatalf("no deny list: %d", w.Code)
+	}
+	gate(s).deny = map[string]bool{denied: true}
+	for _, method := range []string{"GET", "HEAD"} {
+		if w := do(s, method, tarPath, auth); w.Code != 404 || w.Header().Get("Bits-Object-Group") != "" {
+			t.Fatalf("a denied build read: %s %d %v", method, w.Code, w.Header())
+		}
+	}
+	m.statFails = filed("lhcb")
+	if w := do(s, "GET", tarPath, auth); w.Code != 502 {
+		t.Fatalf("a bucket that cannot answer: %d", w.Code)
+	}
+	delete(m.objs, filed("lhcb"))
+	if w := post(s, tarPath+"?uploads", tok, named(tarName, data)); w.Code != 403 || !strings.Contains(w.Body.String(), "denied") {
+		t.Fatalf("a denied build stored again: %d %s", w.Code, w.Body)
+	}
+	gate(s).deny = nil
+	st := startNamed(t, s, tok, tarName, data)
+	m.upload("STAGING/"+st.ID, data)
+	gate(s).deny = map[string]bool{denied: true}
+	if w := post(s, tarPath+"?complete="+st.ID, tok, ""); w.Code != 403 || m.has(filed("lhcb")) {
+		t.Fatalf("denied while uploading, yet stored: %d %s", w.Code, w.Body)
+	}
+	if w := post(s, tarPath+"?complete="+st.ID, tok, ""); w.Code != 404 {
+		t.Fatalf("a denied upload kept: %d %s", w.Code, w.Body)
+	}
+	gate(s).deny = map[string]bool{"sha256:" + strings.Repeat("0", 64): true}
+	st = startNamed(t, s, tok, tarName, data)
+	m.upload("STAGING/"+st.ID, data)
+	if w := post(s, tarPath+"?complete="+st.ID, tok, ""); w.Code != 201 {
+		t.Fatalf("another build denied: %d %s", w.Code, w.Body)
+	}
+	if w := do(s, "GET", tarPath, auth); w.Code != 302 {
+		t.Fatalf("another build denied, this one not read: %d", w.Code)
+	}
+	// its own denied, a group it reads has a good one
+	gate(s).deny, gate(s).Readers = map[string]bool{denied: true}, map[string][]string{"atlas": {"lhcb"}}
+	m.objs[filed("atlas")], m.meta[filed("atlas")] = []byte("good"), map[string]string{"sha256": "sha256:" + strings.Repeat("1", 64)}
+	if w := do(s, "GET", tarPath, auth); w.Code != 302 || w.Header().Get("Bits-Object-Group") != "atlas" {
+		t.Fatalf("another group's good build not read: %d %v", w.Code, w.Header())
 	}
 }

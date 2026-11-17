@@ -63,6 +63,13 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   unsigned`). A read names the group whose build it is in `Bits-Object-Group`
   (its folder, not its metadata): bits reuses the build only when the signature
   verifies over these and the bytes it downloaded; one without, from before, never.
+  `deny` (`["sha256:<hex>", ...]`) withdraws builds by the sha256 they were stored
+  with, from the next reload of config.json: a read finds none (`404`: bits rebuilds
+  it, or reads another group's) and an upload of those bytes is refused (`403
+  denied`), even one started before (one already being stored may still land, not
+  read), so they are never signed again. The object stays until deleted, and with it
+  the hash's folder: delete it so that a rebuild (other bytes) is stored. Build hosts
+  keep what they downloaded.
 - `manifests` is bits' `MANIFESTS` area: the path is the key, as `blob` (the signed
   common manifests), and `GET <prefix>/rev-index/<arch>/<pkg>/<version>?revisions`
   answers `{revision: hash}` from that version's revision markers
