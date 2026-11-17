@@ -274,6 +274,18 @@ func (x *Index) Certified(ctx context.Context, bucket, keys string) (owner map[[
 	return owner, signed, rows.Err()
 }
 
+// Tally is the bucket's objects under prefix (as Each), their bytes, and how many
+// were read at or after since: one query.
+func (x *Index) Tally(ctx context.Context, bucket, prefix string, since time.Time) (c Count, read int64, err error) {
+	q, args := "", []any{since.UnixMilli(), bucket}
+	if prefix != "" {
+		q, args = " AND key >= ? AND key < ?", append(args, prefix+"/", prefix+"0")
+	}
+	err = x.db.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(size), 0), coalesce(sum(read_at >= ?), 0)
+		FROM objects WHERE bucket = ?`+q, args...).Scan(&c.Objects, &c.Bytes, &read)
+	return c, read, err
+}
+
 // Each calls fn with each of the bucket's objects under prefix (a folder without
 // its "/"; "": the bucket), in key order; their SHA-256 is not read.
 func (x *Index) Each(ctx context.Context, bucket, prefix string, fn func(Object)) error {

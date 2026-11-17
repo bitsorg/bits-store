@@ -114,6 +114,16 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   manifest is verified when its `.sig` (bits' Ed25519 envelope) verifies with one of
   `manifest_keys` (PEM public keys, as bits' `keys/*.pem`), checked again when either
   file or the keys change; without `manifest_keys` none is.
+- The admin API, for bits-console's admin pages: on its own address (`-admin-listen`,
+  with `-data`; off without it), never on the store's; plain HTTP, so bind it to an
+  internal network the console alone shares. A request needs an
+  `Authorization: Bearer` token of a key whose `signer` is `admin` (`sub`
+  `admin:<user>`), living 15 minutes at most and allowed the path (`GET /_admin/**`);
+  such a token opens no store path. Each request is logged. `GET /_admin/summary`:
+  for each bucket (named by its first volume) when it was last listed, its drift and
+  totals, and each binding's objects and bytes, those read in the last 30 days, a
+  `tarballs` binding's by architecture (a gated one's by group/architecture) and
+  those a certified build lists (as `/metrics`); recomputed at most once a minute.
 - `/metrics` (with the index; Prometheus text, no token: block it in front, for the
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first

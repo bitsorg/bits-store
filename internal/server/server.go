@@ -50,6 +50,7 @@ type Server struct {
 	accessLog   string
 	health      *volumeHealth
 	scrape      metricsCache
+	summary     summaryCache  // the admin API's
 	index       *index.Index  // nil: none (no -data)
 	verifyEvery time.Duration // how often a bucket is listed against the index
 

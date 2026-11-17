@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,6 +36,7 @@ func main() {
 	gcReads := flag.Int("gc-reads", 10, "with -gc: packages read this many times stay for four times -gc-read; 0: no such rule")
 	gcList := flag.Bool("gc-list", false, "with -gc: name each file that would go")
 	gcOut := flag.String("gc-out", "", "with -gc: write the files that would go to this file, for review and -gc-apply")
+	adminListen := flag.String("admin-listen", "", "also serve the admin API (/_admin/, admin keys' tokens only) on this address; none: off")
 	gcApply := flag.String("gc-apply", "", "with -gc: delete the files this -gc-out file names that the plan, made now, still sweeps")
 	flag.Parse()
 	if flag.NArg() > 0 { // flags end at the first other word: the rest would be ignored
@@ -80,6 +82,20 @@ func main() {
 	}
 	if *every > 0 {
 		go h.Watch(*every)
+	}
+	if *adminListen != "" {
+		if *data == "" {
+			log.Fatal("-admin-listen needs -data: the admin API answers from the index")
+		}
+		ln, err := net.Listen("tcp", *adminListen) // before the store's: a bad address stops the start
+		if err != nil {
+			log.Fatal(err)
+		}
+		admin := &http.Server{Handler: http.HandlerFunc(h.ServeAdmin),
+			ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: time.Minute,
+			IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 16 << 10}
+		log.Printf("bits-store admin API on %s", *adminListen)
+		go func() { log.Fatal(admin.Serve(ln)) }()
 	}
 	addr := cfg.Listen
 	if *listen != "" {
