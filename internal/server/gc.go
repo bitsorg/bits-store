@@ -3,8 +3,10 @@
 package server
 
 import (
+	"bytes"
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,12 +25,14 @@ import (
 // GCOptions bound a collection: packages younger than Grace stay, those read within
 // Read, or read at least Reads times within four times Read (0: no such rule), and
 // the KeepBuilds newest builds of each package version; it refuses to sweep more
-// than Max (a share) of an architecture's packages. List: name the files that would go.
+// than Max (a share) of an architecture's packages. List: name the files that would go;
+// Out: write them to a file; Apply: delete those of such a file the plan still sweeps.
 type GCOptions struct {
 	Grace, Read       time.Duration
 	Reads, KeepBuilds int
 	Max               float64
 	List              bool
+	Out, Apply        string
 }
 
 // GCArch is the plan for one architecture of a bucket's package tree.
@@ -45,6 +49,8 @@ type GCArch struct {
 type GCPlan struct {
 	Volume, Refused string
 	Arches          []*GCArch
+	bucket          string
+	mans            []string // its manifests bindings' key prefixes
 }
 
 // A package file, as bits' gc.py has it: <arch>/store/<h2>/<hash>/<file>, h2 the hash's start.
@@ -75,7 +81,7 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 	}
 	var plans []*GCPlan
 	for _, bucket := range slices.Sorted(maps.Keys(tars)) {
-		p := &GCPlan{Volume: name[bucket]}
+		p := &GCPlan{Volume: name[bucket], bucket: bucket, mans: mans[bucket]}
 		plans = append(plans, p)
 		why, err := s.gcRefused(ctx, bucket, p.Volume, mans[bucket])
 		if err != nil {
@@ -251,6 +257,8 @@ func GC(path, data string, o GCOptions, out io.Writer) int {
 		err = errors.New("-gc-keep-builds: 0 (no such rule) or more")
 	case o.Read == 0 && o.Reads > 0:
 		err = errors.New("-gc-reads counts within four times -gc-read: with -gc-read 0, set -gc-reads 0")
+	case o.Out != "" && o.Apply != "":
+		err = errors.New("-gc-out writes a plan, -gc-apply deletes what one names: not both")
 	}
 	var s *Server
 	if err == nil {
@@ -264,11 +272,229 @@ func GC(path, data string, o GCOptions, out io.Writer) int {
 		defer s.index.Close()
 		plans, err = s.PlanGC(context.Background(), o)
 	}
+	if err == nil && o.Apply != "" {
+		return s.ApplyGC(context.Background(), plans, o, o.Apply, out)
+	}
+	if err == nil && o.Out != "" {
+		err = writeGCFile(o.Out, plans, o, s.now())
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "gc:", err)
 		return 1
 	}
 	return writePlan(out, plans, o)
+}
+
+// gcFile is a plan's files to go, as -gc-out writes it for review and -gc-apply reads it.
+type gcFile struct {
+	Planned time.Time     `json:"planned"`
+	Options gcFileOptions `json:"options"` // -gc-apply plans again with the same
+	Files   []gcFileEntry `json:"files"`
+}
+
+type gcFileOptions struct {
+	Grace      string  `json:"grace"`
+	Read       string  `json:"read"`
+	Reads      int     `json:"reads"`
+	KeepBuilds int     `json:"keep_builds"`
+	Max        float64 `json:"max"`
+}
+
+func fileOptions(o GCOptions) gcFileOptions {
+	return gcFileOptions{o.Grace.String(), o.Read.String(), o.Reads, o.KeepBuilds, o.Max}
+}
+
+type gcFileEntry struct {
+	Volume string `json:"volume"`
+	Bucket string `json:"bucket"` // the volume's endpoint and bucket
+	Key    string `json:"key"`
+	Size   int64  `json:"size"`
+	ETag   string `json:"etag"`
+}
+
+// gcPlanLife is how old a plan file -gc-apply takes may be.
+const gcPlanLife = 7 * 24 * time.Hour
+
+// writeGCFile writes the files of the plans that may go now (none of a refused one).
+func writeGCFile(name string, plans []*GCPlan, o GCOptions, now time.Time) error {
+	f := gcFile{Planned: now.UTC(), Options: fileOptions(o), Files: []gcFileEntry{}}
+	for _, p := range plans {
+		for _, a := range p.Arches {
+			for _, obj := range a.sweep {
+				if p.Refused == "" {
+					f.Files = append(f.Files, gcFileEntry{p.Volume, p.bucket, obj.Key, obj.Size, obj.ETag})
+				}
+			}
+		}
+	}
+	b, err := json.MarshalIndent(f, "", " ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(name), ".gc-plan-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(append(b, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), name)
+}
+
+// readGCFile reads a plan file -gc-out wrote, with options o, at most gcPlanLife ago.
+func readGCFile(name string, o GCOptions, now time.Time) (gcFile, error) {
+	var f gcFile
+	b, err := os.ReadFile(name)
+	if err != nil {
+		return f, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&f); err != nil || dec.More() {
+		return f, fmt.Errorf("not a plan -gc-out wrote: %v", cmp.Or(err, errors.New("more after it")))
+	}
+	switch {
+	case f.Options != fileOptions(o):
+		return f, fmt.Errorf("planned with other options (%+v): apply with the same", f.Options)
+	case f.Planned.After(now.Add(time.Hour)), now.Sub(f.Planned) > gcPlanLife:
+		return f, fmt.Errorf("planned %s: not within %s", f.Planned.Format(time.RFC3339), gcPlanLife)
+	}
+	return f, nil
+}
+
+// ApplyGC deletes the files of the plan file at name that plans (made now, with o)
+// still sweep, each as it was planned (size and ETag, in the index and the bucket),
+// not read nor listed by a manifest since (checked again as it goes); anything else
+// stays and is said. 0: done; 2: a bucket refused, or its manifests changed, now
+// (what is left of it stays); 1: an error (the plan file, a file not deleted).
+func (s *Server) ApplyGC(ctx context.Context, plans []*GCPlan, o GCOptions, name string, out io.Writer) int {
+	f, err := readGCFile(name, o, s.now())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "gc: %s: %v\n", name, err)
+		return 1
+	}
+	byBucket, now, code := map[string]*GCPlan{}, map[[2]string]index.Object{}, 0
+	for _, p := range plans {
+		byBucket[p.bucket] = p
+		if p.Refused != "" {
+			code = 2
+			fmt.Fprintf(out, "volume %q: nothing goes: %s\n", p.Volume, p.Refused)
+			continue
+		}
+		for _, a := range p.Arches {
+			for _, obj := range a.sweep {
+				now[[2]string{p.bucket, obj.Key}] = obj
+			}
+		}
+	}
+	var deleted, kept, failed int
+	var freed int64
+	roots, checked := map[string]map[string]bool{}, map[string]time.Time{} // per bucket
+	keep := func(e gcFileEntry, why string) {
+		fmt.Fprintf(out, "kept: %s %s: %s\n", e.Volume, e.Key, why)
+		kept++
+	}
+	for _, e := range f.Files {
+		p, planned := byBucket[e.Bucket], now[[2]string{e.Bucket, e.Key}]
+		switch {
+		case p == nil:
+			keep(e, "no such volume now")
+			continue
+		case p.Refused != "":
+			keep(e, "its volume is refused now")
+			continue
+		case planned.Key == "":
+			keep(e, "not to go now")
+			continue
+		case planned.Size != e.Size || planned.ETag != e.ETag:
+			keep(e, "not as planned in the index")
+			continue
+		}
+		if time.Since(checked[p.bucket]) > 30*time.Second { // a BOM or manifest new since: what it lists stays
+			why, err := s.gcChanged(ctx, p)
+			if err == nil && why == "" {
+				roots[p.bucket], _, err = s.index.Roots(ctx, p.bucket, s.manifestKeys.IDs())
+			}
+			if err != nil || why != "" {
+				fmt.Fprintf(out, "volume %q: stopped: %s\n", p.Volume, cmp.Or(why, fmt.Sprint(err)))
+				p.Refused = cmp.Or(why, "an error")
+				if err != nil {
+					code = 1
+				} else if code == 0 {
+					code = 2
+				}
+				keep(e, "its volume stopped")
+				continue
+			}
+			checked[p.bucket] = time.Now()
+		}
+		if roots[p.bucket][strings.ToLower(path.Base(path.Dir(e.Key)))] {
+			keep(e, "a manifest lists it now")
+			continue
+		}
+		if row, ok, err := s.index.Get(ctx, p.bucket, e.Key); err != nil {
+			keep(e, "the index: "+err.Error())
+			code = 1
+			continue
+		} else if ok && (row.Reads != planned.Reads || !row.ReadAt.Equal(planned.ReadAt)) {
+			keep(e, "read since planned")
+			continue
+		}
+		st := s.stores[p.Volume]
+		octx, cancel := context.WithTimeout(ctx, time.Minute)
+		fi, found, err := st.Stat(octx, e.Key)
+		if err == nil && found && fi.Size == e.Size && fi.ETag == e.ETag {
+			err = st.Remove(octx, e.Key)
+		}
+		cancel()
+		switch {
+		case err != nil:
+			keep(e, "not deleted: "+err.Error())
+			failed++
+			code = 1
+		case !found:
+			keep(e, "gone already")
+			failed = 0
+		case fi.Size != e.Size || fi.ETag != e.ETag:
+			keep(e, "changed in the bucket since planned")
+			failed = 0
+		default:
+			fmt.Fprintf(out, "deleted: %s %s %s\n", e.Volume, e.Key, bytesOf(e.Size))
+			deleted, freed = deleted+1, freed+e.Size
+			failed = 0
+		}
+		if failed >= 10 {
+			fmt.Fprintln(out, "stopped: 10 files in a row not deleted")
+			break
+		}
+	}
+	fmt.Fprintf(out, "%d deleted (%s), %d kept, of the %d in %s (planned %s)\n", deleted, bytesOf(freed),
+		kept, len(f.Files), name, f.Planned.Format(time.RFC3339))
+	return code
+}
+
+// gcChanged says why the plan's bucket may no longer be swept now ("" when it may):
+// manifests not all read (a BOM new since the plan, say).
+func (s *Server) gcChanged(ctx context.Context, p *GCPlan) (string, error) {
+	if n, err := s.index.Unread(ctx, p.bucket); err != nil || n > 0 {
+		return fmt.Sprintf("%d manifests could not be read", n), err
+	}
+	for _, m := range p.mans {
+		todo, err := s.index.ManifestsToRead(ctx, p.bucket, m, s.manifestKeys.IDs(), s.now(), 1)
+		if err != nil || len(todo) > 0 {
+			return "manifests new since the plan, not all read yet", err
+		}
+	}
+	return "", nil
 }
 
 // writePlan writes plans for people: 0 when every volume may be swept, else 2.

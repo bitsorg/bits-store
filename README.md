@@ -133,7 +133,18 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `index_verify` and two hours, manifests unread or with packages skipped, a common
   manifest outside the bindings that cannot be read, one inside or its `.sig` in the
   store not as the index read it, reads counted for less than `-gc-read`, or more than
-  `-gc-max` (0.25) of an architecture's packages to go. It deletes nothing.
+  `-gc-max` (0.25) of an architecture's packages to go. It deletes nothing: `-gc-out
+  FILE` writes the files that may go now (volume, bucket, key, size, ETag; none of a
+  refused volume) and the options, for review; `-gc-apply FILE` (with the same
+  options, within 7 days) plans again and deletes those of them it still sweeps, as
+  planned in the index and in the bucket (size and ETag, a HEAD each), not read since
+  nor listed by a manifest since (checked again every 30 seconds as it goes, the
+  volume stopped when manifests are left to read); the others stay, each said. Exit 2:
+  a volume refused or stopped, what is left of it stays; 1: the plan file not taken,
+  or a file not deleted (after 10 in a row, it stops). The index is the service's,
+  read only: the next listing drops what went (`extra`), and the service may still
+  name a deleted build for up to 10 minutes (a download then fails: rebuilt).
+  `-gc-*` without `-gc` is refused.
 - `access_log`: `errors` (the default) logs errors and writes, not hits; `all` every
   request; `none` no request lines. Fetches and failures are logged in any case.
 - Writes go through staging; a client never gets a URL for a final key:

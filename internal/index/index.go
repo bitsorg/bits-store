@@ -205,12 +205,16 @@ func (x *Index) Put(ctx context.Context, bucket string, o Object, now time.Time)
 func (x *Index) Get(ctx context.Context, bucket, key string) (o Object, ok bool, err error) {
 	var mtime int64
 	var sha sql.NullString
-	err = x.db.QueryRowContext(ctx, `SELECT size, etag, mtime, sha256, grp FROM objects WHERE bucket = ? AND key = ?`,
-		bucket, key).Scan(&o.Size, &o.ETag, &mtime, &sha, &o.Grp)
+	var readAt int64
+	err = x.db.QueryRowContext(ctx, `SELECT size, etag, mtime, sha256, grp, reads, read_at FROM objects
+		WHERE bucket = ? AND key = ?`, bucket, key).Scan(&o.Size, &o.ETag, &mtime, &sha, &o.Grp, &o.Reads, &readAt)
 	if err == sql.ErrNoRows {
 		return Object{}, false, nil
 	}
 	o.Key, o.Mtime, o.SHA256 = key, time.UnixMilli(mtime), sha.String
+	if readAt > 0 {
+		o.ReadAt = time.UnixMilli(readAt)
+	}
 	return o, err == nil, err
 }
 

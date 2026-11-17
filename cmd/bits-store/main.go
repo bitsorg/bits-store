@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bitsorg/bits-store/internal/index"
@@ -33,6 +34,8 @@ func main() {
 	gcRead := flag.Duration("gc-read", 30*24*time.Hour, "with -gc: packages read within this stay; 0: no such rule")
 	gcReads := flag.Int("gc-reads", 10, "with -gc: packages read this many times stay for four times -gc-read; 0: no such rule")
 	gcList := flag.Bool("gc-list", false, "with -gc: name each file that would go")
+	gcOut := flag.String("gc-out", "", "with -gc: write the files that would go to this file, for review and -gc-apply")
+	gcApply := flag.String("gc-apply", "", "with -gc: delete the files this -gc-out file names that the plan, made now, still sweeps")
 	flag.Parse()
 	if *showVersion {
 		fmt.Println(version)
@@ -49,9 +52,14 @@ func main() {
 		fmt.Println("ok")
 		return
 	}
+	flag.Visit(func(f *flag.Flag) {
+		if strings.HasPrefix(f.Name, "gc-") && !*gc {
+			log.Fatalf("-%s is for -gc", f.Name) // never a second service beside the first
+		}
+	})
 	if *gc {
 		os.Exit(server.GC(*config, *data, server.GCOptions{Grace: *gcGrace, Max: *gcMax, Read: *gcRead,
-			Reads: *gcReads, KeepBuilds: *gcKeep, List: *gcList}, os.Stdout))
+			Reads: *gcReads, KeepBuilds: *gcKeep, List: *gcList, Out: *gcOut, Apply: *gcApply}, os.Stdout))
 	}
 	h, cfg, err := server.NewReloader(*config)
 	if err != nil {

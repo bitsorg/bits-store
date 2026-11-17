@@ -219,6 +219,16 @@ func TestGCCommand(t *testing.T) {
 	if code := GC(cfg, dir, ok, &out); code != 0 || !strings.Contains(out.String(), "nothing to plan") {
 		t.Fatalf("exit %d: %s", code, out.String())
 	}
+	if code := GC(cfg, dir, GCOptions{Grace: time.Hour, Max: 0.25, Out: "a", Apply: "b"}, io.Discard); code != 1 {
+		t.Fatalf("-gc-out and -gc-apply: exit %d", code)
+	}
+	plan := filepath.Join(dir, "plan.json")
+	if code := GC(cfg, dir, GCOptions{Grace: time.Hour, Max: 0.25, Out: plan}, io.Discard); code != 0 {
+		t.Fatalf("-gc-out: exit %d", code)
+	}
+	if code := GC(cfg, dir, GCOptions{Grace: time.Hour, Max: 0.25, Apply: plan}, io.Discard); code != 0 {
+		t.Fatalf("-gc-apply: exit %d", code)
+	}
 }
 
 // Common manifests outside the manifests bindings (the orchestrator's CANARY/ ones)
@@ -386,4 +396,151 @@ func TestGCKeepsTheNewestBuilds(t *testing.T) {
 	if plans[0].Refused != "" || len(gone) != 3 || !gone[want[0]] || !gone[want[1]] || !gone[want[2]] || el9.Newest != 10 {
 		t.Fatalf("%q: gone %v, %d newest", plans[0].Refused, gone, el9.Newest)
 	}
+}
+
+// A plan written for review, then applied: only what it names and the plan made then
+// still sweeps, as planned, goes.
+func TestGCApply(t *testing.T) {
+	s, m, x, _ := gcSetup(t)
+	ctx := context.Background()
+	o := GCOptions{Grace: 7 * 24 * time.Hour, Max: 0.25}
+	file := filepath.Join(t.TempDir(), "plan.json")
+	gone := "TT/el9/store/bb/bb22/b-1-1.el9.tar.gz"
+	write := func(f gcFile) {
+		b, err := json.Marshal(f)
+		if err != nil || os.WriteFile(file, b, 0o644) != nil {
+			t.Fatal(err)
+		}
+	}
+	read := func() gcFile {
+		var f gcFile
+		if b, err := os.ReadFile(file); err != nil || json.Unmarshal(b, &f) != nil {
+			t.Fatalf("%s %v", b, err)
+		}
+		return f
+	}
+	apply := func(plans []*GCPlan) (int, string) {
+		var out strings.Builder
+		code := s.ApplyGC(ctx, plans, o, file, &out)
+		return code, out.String()
+	}
+	if err := writeGCFile(file, mustPlan(t, s, o), o, s.now()); err != nil {
+		t.Fatal(err)
+	}
+	f := read()
+	if len(f.Files) != 1 || f.Files[0] != (gcFileEntry{"s3", s.place["s3"], gone, 3, m.etag(gone)}) {
+		t.Fatalf("%+v", f)
+	}
+	planned := f.Files[0]
+	// what the reviewer was not shown: a root, an uncertified architecture's, another ETag
+	f.Files = append(f.Files, gcFileEntry{"s3", s.place["s3"], "TT/el9/store/aa/aa/a-1-1.el9.tar.gz", 9, "e"},
+		gcFileEntry{"s3", s.place["s3"], "TT/el10/store/dd/dd44/d-1-1.el10.tar.gz", 15, m.etag("TT/el10/store/dd/dd44/d-1-1.el10.tar.gz")},
+		gcFileEntry{"s3", s.place["s3"], gone, 3, "another"})
+	write(f)
+	if code, out := apply(nil); code != 0 || !m.has(gone) {
+		t.Fatalf("no plan now, yet deleted: %d %s", code, out)
+	}
+	if code, out := apply(mustPlan(t, s, o)); code != 0 || m.has(gone) ||
+		!strings.Contains(out, "1 deleted (3.0 B), 3 kept, of the 4") || !strings.Contains(out, "not as planned in the index") {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	for _, k := range []string{"TT/el9/store/aa/aa/a-1-1.el9.tar.gz", "TT/el10/store/dd/dd44/d-1-1.el10.tar.gz"} {
+		if !m.has(k) {
+			t.Fatalf("%s deleted", k)
+		}
+	}
+	// planned, then: other bytes of the same size in the bucket; read; listed by a new BOM
+	m.objs[gone] = []byte("not")
+	plans := mustPlan(t, s, o)
+	write(gcFile{s.now().UTC(), fileOptions(o), []gcFileEntry{planned}})
+	m.etags[gone] = "other"
+	if _, out := apply(plans); !m.has(gone) || !strings.Contains(out, "changed in the bucket since planned") {
+		t.Fatalf("a changed file deleted: %s", out)
+	}
+	delete(m.etags, gone)
+	x.AddReads(ctx, map[[2]string]index.Read{{s.place["s3"], gone}: {N: 1, Last: s.now()}})
+	if _, out := apply(plans); !m.has(gone) || !strings.Contains(out, "read since planned") {
+		t.Fatalf("a file read since deleted: %s", out)
+	}
+	// a bucket that cannot answer: exit 1
+	plans = mustPlan(t, s, o)
+	m.statFails = gone
+	if code, out := apply(plans); code != 1 || !m.has(gone) {
+		t.Fatalf("a failing bucket: %d %s", code, out)
+	}
+	plans = mustPlan(t, s, o)
+	if len(plans[0].Arches) == 0 {
+		t.Fatal("no plan")
+	}
+	x.PutManifest(ctx, s.place["s3"], index.Manifest{Key: "MM/release_z/b.json", ETag: "z", Kind: index.KindBOM, At: s.now(),
+		Builds: []string{"z"}, Entries: []index.Entry{{Arch: "el9", Hash: "bb22"}}})
+	if _, out := apply(plans); !m.has(gone) || !strings.Contains(out, "a manifest lists it now") {
+		t.Fatalf("a file a BOM lists since deleted: %s", out)
+	}
+	// a second bucket, checked on its own: a BOM there since its plan keeps its file
+	m2 := newMem()
+	s.stores["zz"], s.place["zz"] = m2, "https://s3.example.org zz"
+	k := "TT/el9/store/ff/ff66/f-1-1.el9.tar.gz"
+	m2.objs[k] = []byte("abc")
+	obj := index.Object{Key: k, Size: 3, ETag: m2.etag(k), Mtime: s.now().Add(-100 * 24 * time.Hour)}
+	x.Put(ctx, s.place["zz"], obj, s.now())
+	m3 := newMem() // a bucket checked first, its file not listed by any manifest
+	s.stores["yy"], s.place["yy"] = m3, "https://s3.example.org yy"
+	k3 := "TT/el9/store/ee/ee55/e-1-1.el9.tar.gz"
+	m3.objs[k3] = []byte("abc")
+	obj3 := index.Object{Key: k3, Size: 3, ETag: m3.etag(k3), Mtime: obj.Mtime}
+	x.Put(ctx, s.place["yy"], obj3, s.now())
+	two := []*GCPlan{{Volume: "yy", bucket: s.place["yy"], Arches: []*GCArch{{Arch: "el9", sweep: []index.Object{obj3}}}},
+		{Volume: "zz", bucket: s.place["zz"], Arches: []*GCArch{{Arch: "el9", sweep: []index.Object{obj}}}}}
+	x.PutManifest(ctx, s.place["zz"], index.Manifest{Key: "MM/release_z/b.json", ETag: "z", Kind: index.KindBOM, At: s.now(),
+		Builds: []string{"z"}, Entries: []index.Entry{{Arch: "el9", Hash: "ff66"}}})
+	writeGCFile(file, two, o, s.now())
+	if _, out := apply(two); !m2.has(k) || !strings.Contains(out, "kept: zz "+k+": a manifest lists it now") || m3.has(k3) {
+		t.Fatalf("the second bucket's root deleted, or the first's file kept: %s", out)
+	}
+	// a manifest left to read (new since the plan): its volume stops, exit 2
+	x.Put(ctx, s.place["zz"], index.Object{Key: "MM/release_y/new.json", Size: 2, ETag: "n"}, s.now()) // as uploaded
+	two[1].mans = []string{"MM"}
+	if code, out := apply(two); code != 2 || !m2.has(k) || !strings.Contains(out, `volume "zz": stopped`) {
+		t.Fatalf("a manifest left to read: %d %s", code, out)
+	}
+	for _, v := range []string{"yy", "zz"} {
+		delete(s.stores, v)
+		delete(s.place, v)
+	}
+	// refused now: nothing goes, exit 2; a refused plan writes no file to go
+	write(gcFile{s.now().UTC(), fileOptions(o), []gcFileEntry{planned}})
+	if code, out := apply([]*GCPlan{{Volume: "s3", bucket: s.place["s3"], Refused: "no"}}); code != 2 || !m.has(gone) ||
+		!strings.Contains(out, "its volume is refused now") {
+		t.Fatalf("refused: %d %s", code, out)
+	}
+	plans[0].Refused = "no"
+	if writeGCFile(file, plans, o, s.now()); len(read().Files) != 0 {
+		t.Fatal("a refused plan's files written")
+	}
+	// files not as -gc-out writes them: refused
+	for name, f := range map[string]func(){
+		"more after it": func() {
+			write(gcFile{s.now(), fileOptions(o), nil})
+			b, _ := os.ReadFile(file)
+			os.WriteFile(file, append(b, " {}"...), 0o644)
+		},
+		"unknown field":   func() { os.WriteFile(file, []byte(`{"files": [], "more": 1}`), 0o644) },
+		"other options":   func() { write(gcFile{s.now(), fileOptions(GCOptions{Grace: time.Hour, Max: 0.25}), nil}) },
+		"too old":         func() { write(gcFile{s.now().Add(-gcPlanLife - time.Hour), fileOptions(o), nil}) },
+		"from the future": func() { write(gcFile{s.now().Add(2 * time.Hour), fileOptions(o), nil}) },
+	} {
+		f()
+		if code, _ := apply(nil); code != 1 {
+			t.Fatalf("%s: exit %d", name, code)
+		}
+	}
+}
+
+func mustPlan(t *testing.T, s *Server, o GCOptions) []*GCPlan {
+	plans, err := s.PlanGC(context.Background(), o)
+	if err != nil || len(plans) != 1 || plans[0].Refused != "" {
+		t.Fatalf("%v %v", plans, err)
+	}
+	return plans
 }
