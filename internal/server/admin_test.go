@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -347,4 +348,74 @@ func TestAdminObject(t *testing.T) {
 	get(400, tars, "")
 	get(404, tars, "TT/el9/store/zz/zz/none")
 	get(404, "/nowhere", a)
+}
+
+// The access view: the configuration in force, key ids and signers without the keys.
+func TestAdminAccess(t *testing.T) {
+	s, _, _ := setup(t)
+	auth := map[string]string{"Authorization": "Bearer " + adminToken(t, s, "admin:alice", time.Minute, "GET /_admin/**")}
+	w := doAdmin(s, "GET", "/_admin/access", auth)
+	var a Access
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &a) != nil {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	signers := map[string]string{}
+	for _, k := range a.Keys {
+		signers[k.ID] = k.Signer
+	}
+	if signers["test-1"] != "user" || signers["build-1"] != "build" || signers["admin-1"] != "admin" ||
+		a.RestrictedSign != "" || a.MaxLifetime != "168h" || a.PerSubject != 100 {
+		t.Fatalf("%s", w.Body)
+	}
+	for _, secret := range []string{`"x"`, "TEST_AK", "TEST_SK", "key_env", "region", "site_"} {
+		if strings.Contains(w.Body.String(), secret) {
+			t.Fatalf("%s in %s", secret, w.Body)
+		}
+	}
+	for i, b := range a.Bindings {
+		if i > 0 && a.Bindings[i-1].Prefix > b.Prefix {
+			t.Fatalf("not by prefix: %v", a.Bindings)
+		}
+	}
+	vols := map[string]bool{}
+	for _, v := range a.Volumes {
+		vols[v.Name] = v.Keys
+	}
+	if !vols["s3"] || vols["pub"] {
+		t.Fatalf("volumes: %v", a.Volumes)
+	}
+	t.Setenv("TEST_AK", "a")
+	t.Setenv("TEST_SK", "s")
+	deny := "sha256:" + strings.Repeat("ab", 32)
+	g, err := New(&Config{Issuer: "i", Audience: "a", Keys: map[string]KeyConfig{"k": {X: strings.Repeat("A", 43), Signer: "user"}},
+		Volumes: map[string]VolumeConf{"p": {Endpoint: "https://s3.example.org", Bucket: "private", Region: "r",
+			AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}},
+		Bindings: []Binding{{Prefix: "/restricted", Volume: "p", KeyPrefix: "TARS", Format: "tarballs", Gate: "group",
+			Readers: map[string][]string{"sft": {"lhcb"}}, Deny: []string{deny}}},
+		RestrictedSigner: SignerConf{AgentSocket: "/run/agent.sock", Route: "r", Host: "signer", Prefix: "/sign/r"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := g.access.Bindings[0]
+	if b.Gate != "group" || len(b.Readers["sft"]) != 1 || b.Readers["sft"][0] != "lhcb" || len(b.Deny) != 1 || b.Deny[0] != deny ||
+		g.access.RestrictedSign != "r" || g.access.Volumes[0].Bucket != "private" {
+		t.Fatalf("%+v", g.access)
+	}
+	b.Readers["sft"][0] = "atlas" // the view is a copy
+	if g.bindings[0].Readers["sft"][0] != "lhcb" {
+		t.Fatal("the view shares the running bindings")
+	}
+	// a reload shows the new configuration
+	path := filepath.Join(t.TempDir(), "config.json")
+	c, _, _ := reloadConfig(t, Binding{Prefix: "/sources/archives", Volume: "s3", KeyPrefix: "SOURCES/cache"})
+	writeConfig(t, path, c)
+	r, _, err := NewReloader(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Bindings = append(c.Bindings, Binding{Prefix: "/store", Volume: "s3", KeyPrefix: "TARS", Format: "tarballs"})
+	writeConfig(t, path, c)
+	if ok, err := r.Check(); !ok || err != nil || len(r.cur.Load().access.Bindings) != 2 {
+		t.Fatalf("reloaded: %v %v %+v", ok, err, r.cur.Load().access.Bindings)
+	}
 }

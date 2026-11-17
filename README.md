@@ -142,6 +142,12 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   package's `listed_by` (each BOM and common manifest listing its hash under its
   architecture, the builds it names, whether one of `manifest_keys` verifies it); a
   manifest's `kind` and `builds`.
+  `GET /_admin/access`: the configuration in force (as reloaded), without secrets:
+  issuer, audience, lifetimes; the token keys' ids and signers; each volume's
+  endpoint and bucket and whether the service holds keys for it (their values stay in
+  the environment); each binding with its gate, `readers` and `deny`; the manifest
+  keys' ids; the restricted builds' signer route; the fetch budgets and trusted
+  domains (not the site's addresses).
 - `/metrics` (with the index; Prometheus text, no token: block it in front, for the
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first

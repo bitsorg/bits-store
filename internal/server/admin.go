@@ -79,6 +79,11 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 		return s.adminObjects(w, r, rawQuery), t, p
 	case adminPrefix + "object":
 		return s.adminObject(w, r, rawQuery), t, p
+	case adminPrefix + "access":
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		json.NewEncoder(w).Encode(s.access)
+		return http.StatusOK, t, p
 	}
 	return fail(w, http.StatusNotFound), t, p
 }
@@ -568,4 +573,79 @@ func (s *Server) binding(prefix string) *Binding {
 		}
 	}
 	return nil
+}
+
+// Access is who may do what, as the configuration in force says: the token keys
+// (ids and signers), the volumes (no key values: the environment holds them), the
+// bindings with their gates, readers and withdrawn builds, the manifest keys' ids,
+// the restricted builds' signer route and the fetch budgets (not the site's
+// addresses: no topology beyond what the page needs).
+type Access struct {
+	Issuer         string          `json:"issuer"`
+	Audience       string          `json:"audience"`
+	MaxLifetime    string          `json:"max_lifetime"`
+	URLLifetime    string          `json:"url_lifetime"`
+	Keys           []AccessKey     `json:"keys"`
+	Volumes        []AccessVolume  `json:"volumes"`
+	Bindings       []AccessBinding `json:"bindings"`
+	ManifestKeys   []string        `json:"manifest_keys"`   // their ids
+	RestrictedSign string          `json:"restricted_sign"` // the signer's route; "": none
+	Trusted        []string        `json:"fetch_trusted"`   // domains fetched from without a budget
+	PerSubject     int             `json:"fetch_per_subject"`
+	PerDomain      int             `json:"fetch_per_domain"`
+}
+
+// AccessKey is a token key: its id and signer (user, build or admin).
+type AccessKey struct {
+	ID     string `json:"id"`
+	Signer string `json:"signer"`
+}
+
+// AccessVolume is a bucket and whether the service holds keys for it.
+type AccessVolume struct {
+	Name     string `json:"name"`
+	Endpoint string `json:"endpoint"`
+	Bucket   string `json:"bucket"`
+	Keys     bool   `json:"keys"` // false: anonymous, read only
+}
+
+// AccessBinding is a path the service answers and what reaches it.
+type AccessBinding struct {
+	Prefix    string              `json:"prefix"`
+	Volume    string              `json:"volume"`
+	KeyPrefix string              `json:"key_prefix"`
+	Format    string              `json:"format"`
+	Public    bool                `json:"public"`
+	Gate      string              `json:"gate,omitempty"`
+	Readers   map[string][]string `json:"readers,omitempty"`
+	Deny      []string            `json:"deny,omitempty"`
+}
+
+// accessOf is c as GET /_admin/access shows it, with its checked bindings bs.
+func accessOf(c *Config, bs []Binding, mkeys index.Keys) Access {
+	a := Access{Issuer: c.Issuer, Audience: c.Audience, MaxLifetime: cmp.Or(c.MaxLifetime, "168h"),
+		URLLifetime: cmp.Or(c.URLLifetime, "5m"), Keys: []AccessKey{}, Volumes: []AccessVolume{},
+		Bindings: []AccessBinding{}, ManifestKeys: []string{}, RestrictedSign: c.RestrictedSigner.Route,
+		Trusted: append([]string{}, c.Fetch.Trusted...), PerSubject: cmp.Or(c.Fetch.PerSubject, 100),
+		PerDomain: cmp.Or(c.Fetch.PerDomain, 100)}
+	for _, id := range slices.Sorted(maps.Keys(c.Keys)) {
+		a.Keys = append(a.Keys, AccessKey{id, c.Keys[id].Signer})
+	}
+	for _, n := range slices.Sorted(maps.Keys(c.Volumes)) {
+		v := c.Volumes[n]
+		a.Volumes = append(a.Volumes, AccessVolume{n, v.Endpoint, v.Bucket, v.AccessKeyEnv != ""})
+	}
+	for _, b := range bs {
+		readers := map[string][]string{} // copies: never the running bindings'
+		for g, rs := range b.Readers {
+			readers[g] = slices.Clone(rs)
+		}
+		a.Bindings = append(a.Bindings, AccessBinding{b.Prefix, b.Volume, b.KeyPrefix, b.Format, b.Public, b.Gate,
+			readers, slices.Clone(b.Deny)})
+	}
+	slices.SortFunc(a.Bindings, func(x, y AccessBinding) int { return strings.Compare(x.Prefix, y.Prefix) })
+	if ids := mkeys.IDs(); ids != "" {
+		a.ManifestKeys = strings.Split(ids, ",")
+	}
+	return a
 }
