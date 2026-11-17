@@ -27,8 +27,11 @@ const (
 // Key is a verification key and the kind of signer that holds its private half.
 type Key struct {
 	Public ed25519.PublicKey
-	Signer string // "user" (bits-console) or "build" (the orchestrator)
+	Signer string // "user" (bits-console), "build" (the orchestrator) or "admin" (the admin API's)
 }
+
+// subjects is the prefix a token's sub has exactly when its key's signer is that one.
+var subjects = map[string]string{"build": "build:", "admin": "admin:"}
 
 // Verifier holds what a site configures to check tokens.
 type Verifier struct {
@@ -47,6 +50,7 @@ type Cap struct {
 // Token is a verified token.
 type Token struct {
 	Sub, Grp, Jti string
+	Signer        string // its key's
 	Iat, Exp      int64
 	Caps          []Cap
 }
@@ -68,8 +72,8 @@ func (v *Verifier) Check() error {
 		return errors.New("token verifier: issuer, audience, keys and lifetime needed")
 	}
 	for kid, k := range v.Keys {
-		if len(k.Public) != ed25519.PublicKeySize || k.Signer != "user" && k.Signer != "build" {
-			return fmt.Errorf("token verifier: key %q: 32-byte key and signer user or build needed", kid)
+		if _, ok := subjects[k.Signer]; len(k.Public) != ed25519.PublicKeySize || k.Signer != "user" && !ok {
+			return fmt.Errorf("token verifier: key %q: 32-byte key and signer user, build or admin needed", kid)
 		}
 	}
 	return nil
@@ -111,9 +115,12 @@ func (v *Verifier) Verify(tok string, now time.Time) (*Token, error) {
 			return nil, invalid("claim %s", name)
 		}
 	}
-	if strings.HasPrefix(t.Sub, "build:") != (key.Signer == "build") {
-		return nil, invalid("subject does not fit the key's signer")
+	for signer, prefix := range subjects {
+		if strings.HasPrefix(t.Sub, prefix) != (key.Signer == signer) {
+			return nil, invalid("subject does not fit the key's signer")
+		}
 	}
+	t.Signer = key.Signer
 	if t.Iat, err = timeClaim(c["iat"]); err != nil {
 		return nil, invalid("iat")
 	}

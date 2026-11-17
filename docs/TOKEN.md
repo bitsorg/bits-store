@@ -36,7 +36,8 @@ Header, a JSON object with exactly these members:
 
 `sig` is the Ed25519 signature of the ASCII bytes `base64url(header) "." base64url(payload)`
 with the key named by `kid`. The verifier is configured with each `kid`'s raw 32-byte
-public key and its signer: `user` (bits-console) or `build` (the orchestrator). An
+public key and its signer: `user` (bits-console), `build` (the orchestrator) or `admin`
+(bits-console's admin pages: bits-store's admin API only, never its paths). An
 unknown `kid` makes the token invalid. Keys rotate by adding a new `kid`.
 
 ## Claims
@@ -47,7 +48,7 @@ The payload is a JSON object.
 |---|---|---|
 | `iss` | string | issuer; must equal the verifier's configured issuer |
 | `aud` | string | the store's configured audience (a string, not a list) |
-| `sub` | string | who, for the audit log: `build:<job>` exactly when the key's signer is `build` |
+| `sub` | string | who, for the audit log: `build:<job>` exactly when the key's signer is `build`, `admin:<user>` exactly when it is `admin` |
 | `grp` | string | the group signed in to: the audit log, and the folder a gated binding files and reads builds under, if `[a-z0-9][a-z0-9._-]{0,63}` (an issuer puts only a verified group here) |
 | `iat` | integer | issued at, seconds since the epoch |
 | `exp` | integer | expires at, seconds since the epoch |

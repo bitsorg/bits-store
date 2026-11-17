@@ -12,6 +12,10 @@
   "build-1": {
    "x": "oeasSpMvSuxDIEdknUqR0PG0SnHLYwbfZieO71rC_Xo",
    "signer": "build"
+  },
+  "admin-1": {
+   "x": "X1FvjSTK9cIvQqlAxtwjbCuU0Q9f29mHM0DcgJqUsLs",
+   "signer": "admin"
   }
  },
  "cases": [
@@ -90,6 +94,13 @@
    "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJidWlsZC0xIn0.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImJ1aWxkOjEyMyIsICJncnAiOiAibGhjYiIsICJpYXQiOiAxNzk5OTk5NDAwLCAiZXhwIjogMTgwMDAwMzYwMCwgImp0aSI6ICJ0LTEiLCAiY2FwIjogW3sibSI6ICJHRVQiLCAicCI6ICIvc3RvcmUvbGhjYi94ODZfNjQtZWwxMCovKioifSwgeyJtIjogIkdFVCIsICJwIjogIi9zb3VyY2VzL2FyY2hpdmVzLyoifSwgeyJtIjogIlBVVCIsICJwIjogIi9zdG9yZS9saGNiL3g4Nl82NC1lbDEwLWdjYzE0LW9wdC8qKiJ9XX0.8gCjMXtvQ8R3GLBKTuJdOHFwpzCe45KVZUxyGXKxGEZLBijieiSa-unK6AsAMyQ-4ELyNDHv0CHvDsfmC2D4DQ",
    "method": "GET",
    "path": "/sources/archives/x",
+   "outcome": "allow"
+  },
+  {
+   "name": "admin-key-admin-sub",
+   "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJhZG1pbi0xIn0.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImFkbWluOmFsaWNlIiwgImdycCI6ICJsaGNiIiwgImlhdCI6IDE3OTk5OTk0MDAsICJleHAiOiAxODAwMDAzNjAwLCAianRpIjogInQtMSIsICJjYXAiOiBbeyJtIjogIkdFVCIsICJwIjogIi9fYWRtaW4vKioifV19.cDFxjrqEzlsvutCKXP47Fv45VEPRyVbf1Q0bySx62s4XA7w0EybDoAyKsOUzWhelTWYViBgjMVWTdUtXP9vNDg",
+   "method": "GET",
+   "path": "/_admin/summary",
    "outcome": "allow"
   },
   {
@@ -389,6 +400,34 @@
   {
    "name": "user-key-build-sub",
    "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJ0ZXN0LTEifQ.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImJ1aWxkOjEyMyIsICJncnAiOiAibGhjYiIsICJpYXQiOiAxNzk5OTk5NDAwLCAiZXhwIjogMTgwMDAwMzYwMCwgImp0aSI6ICJ0LTEiLCAiY2FwIjogW3sibSI6ICJHRVQiLCAicCI6ICIvc3RvcmUvbGhjYi94ODZfNjQtZWwxMCovKioifSwgeyJtIjogIkdFVCIsICJwIjogIi9zb3VyY2VzL2FyY2hpdmVzLyoifSwgeyJtIjogIlBVVCIsICJwIjogIi9zdG9yZS9saGNiL3g4Nl82NC1lbDEwLWdjYzE0LW9wdC8qKiJ9XX0.B6_k9RHYxfZQD468hMgBQ9KnY0dO9z0jMzb7vsBzltWxZfz45I-LiKEhWIXY2CVEzZ2EH600LsBTwu7LNUlMBg",
+   "method": "GET",
+   "path": "/sources/archives/x",
+   "outcome": "invalid"
+  },
+  {
+   "name": "admin-key-user-sub",
+   "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJhZG1pbi0xIn0.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImFsaWNlIiwgImdycCI6ICJsaGNiIiwgImlhdCI6IDE3OTk5OTk0MDAsICJleHAiOiAxODAwMDAzNjAwLCAianRpIjogInQtMSIsICJjYXAiOiBbeyJtIjogIkdFVCIsICJwIjogIi9zdG9yZS9saGNiL3g4Nl82NC1lbDEwKi8qKiJ9LCB7Im0iOiAiR0VUIiwgInAiOiAiL3NvdXJjZXMvYXJjaGl2ZXMvKiJ9LCB7Im0iOiAiUFVUIiwgInAiOiAiL3N0b3JlL2xoY2IveDg2XzY0LWVsMTAtZ2NjMTQtb3B0LyoqIn1dfQ.5jHCDEuDX6KKr9ec08_F1VvpZA_EQdvsY9RAU7vAPo9BWhLFq_sMUSlz592B79v7yh9qteBmGSHldi3byH6xAg",
+   "method": "GET",
+   "path": "/sources/archives/x",
+   "outcome": "invalid"
+  },
+  {
+   "name": "user-key-admin-sub",
+   "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJ0ZXN0LTEifQ.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImFkbWluOmFsaWNlIiwgImdycCI6ICJsaGNiIiwgImlhdCI6IDE3OTk5OTk0MDAsICJleHAiOiAxODAwMDAzNjAwLCAianRpIjogInQtMSIsICJjYXAiOiBbeyJtIjogIkdFVCIsICJwIjogIi9zdG9yZS9saGNiL3g4Nl82NC1lbDEwKi8qKiJ9LCB7Im0iOiAiR0VUIiwgInAiOiAiL3NvdXJjZXMvYXJjaGl2ZXMvKiJ9LCB7Im0iOiAiUFVUIiwgInAiOiAiL3N0b3JlL2xoY2IveDg2XzY0LWVsMTAtZ2NjMTQtb3B0LyoqIn1dfQ.KKJL6bBEvyOOi-NbV2igKrfUDfsTsQXPnZ-KFjmLQHvPtJuAllkzGmOKsFc_lLPmGOX4xfvPZV6FCTslcmKhAg",
+   "method": "GET",
+   "path": "/sources/archives/x",
+   "outcome": "invalid"
+  },
+  {
+   "name": "build-key-admin-sub",
+   "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJidWlsZC0xIn0.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImFkbWluOjEyMyIsICJncnAiOiAibGhjYiIsICJpYXQiOiAxNzk5OTk5NDAwLCAiZXhwIjogMTgwMDAwMzYwMCwgImp0aSI6ICJ0LTEiLCAiY2FwIjogW3sibSI6ICJHRVQiLCAicCI6ICIvc3RvcmUvbGhjYi94ODZfNjQtZWwxMCovKioifSwgeyJtIjogIkdFVCIsICJwIjogIi9zb3VyY2VzL2FyY2hpdmVzLyoifSwgeyJtIjogIlBVVCIsICJwIjogIi9zdG9yZS9saGNiL3g4Nl82NC1lbDEwLWdjYzE0LW9wdC8qKiJ9XX0.rKsSgN_IVdqBvXWIq0FdNTgfiV5DNSOn6zkImNFCDTK-oyL1J_d9DCy_us2mNhKlHFjmgCqe0YLhB9Z1aAnBBw",
+   "method": "GET",
+   "path": "/sources/archives/x",
+   "outcome": "invalid"
+  },
+  {
+   "name": "admin-key-build-sub",
+   "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJhZG1pbi0xIn0.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImJ1aWxkOjEyMyIsICJncnAiOiAibGhjYiIsICJpYXQiOiAxNzk5OTk5NDAwLCAiZXhwIjogMTgwMDAwMzYwMCwgImp0aSI6ICJ0LTEiLCAiY2FwIjogW3sibSI6ICJHRVQiLCAicCI6ICIvc3RvcmUvbGhjYi94ODZfNjQtZWwxMCovKioifSwgeyJtIjogIkdFVCIsICJwIjogIi9zb3VyY2VzL2FyY2hpdmVzLyoifSwgeyJtIjogIlBVVCIsICJwIjogIi9zdG9yZS9saGNiL3g4Nl82NC1lbDEwLWdjYzE0LW9wdC8qKiJ9XX0.HWXzTgY1vhHq7WcZ93RUIfpLdbqgC84OsV30DTxLUeRHL81x_e3P_dPTgOkuSXN56OGosCPKI31gTndhYCjLDg",
    "method": "GET",
    "path": "/sources/archives/x",
    "outcome": "invalid"

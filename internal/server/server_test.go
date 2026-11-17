@@ -134,6 +134,7 @@ func TestRequests(t *testing.T) {
 		{"head", "HEAD", "/sources/archives/x", auth, 302, "/bits/SOURCES/cache/x"},
 		{"store", "GET", "/store/lhcb/x86_64-el10-gcc14-opt/ab/h", auth, 302, "/bits/TARS/x86_64-el10-gcc14-opt/ab/h"},
 		{"longest-prefix", "GET", "/store/lhcb/x86_64-el10/ab", auth, 302, "/bits/EL10/ab"},
+		{"admin-token", "GET", "/store/lhcb/x86_64-el10/ab", map[string]string{"Authorization": "Bearer " + tokenNamed(t, "admin-key-admin-sub")}, 401, ""},
 		{"no-capability", "GET", "/sources/archives/a/b", auth, 403, ""},
 		{"no-binding", "GET", "/store/atlas/x", auth, 404, ""},
 		{"no-binding-no-token", "GET", "/store/atlas/x", nil, 401, ""},

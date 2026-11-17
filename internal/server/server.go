@@ -8,6 +8,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -146,6 +147,9 @@ func fail(w http.ResponseWriter, c int) int {
 	return c
 }
 
+// errAdminToken: an admin key's token opens the admin API only, never a binding.
+var errAdminToken = errors.New("an admin token outside the admin API")
+
 func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *token.Token, p string) {
 	// The path exactly as sent, never Go's decoded r.URL.Path (docs/TOKEN.md).
 	p, rawQuery, _ := strings.Cut(r.RequestURI, "?")
@@ -179,7 +183,10 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		if tok == "" {
 			return fail(w, http.StatusUnauthorized), nil, p
 		}
-		if t, err = s.verify(tok, now); err != nil {
+		if t, err = s.verify(tok, now); err == nil && t.Signer == "admin" {
+			err = errAdminToken
+		}
+		if err != nil {
 			log.Printf("%s %s %q: %v", r.RemoteAddr, r.Method, p, err) // logged, never sent back
 			return fail(w, http.StatusUnauthorized), nil, p
 		}
