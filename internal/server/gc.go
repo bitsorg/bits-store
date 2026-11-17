@@ -61,21 +61,24 @@ var packageKey = regexp.MustCompile(`^([0-9A-Za-z][0-9A-Za-z._+-]*)/store/([0-9A
 // goes when its hash is no root (index.Roots), it is older than o.Grace and a verified
 // common manifest lists packages of its architecture. Fail-closed: a bucket whose
 // index may not be the store (not listed lately, manifests unread, common manifests
-// changed since) is refused.
+// changed since) is refused. A gated binding's builds (one folder per group) have no
+// manifests: they go by age, reads and newer builds alone.
 func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
-	tars, mans, name := map[string][]string{}, map[string][]string{}, map[string]string{}
+	tars, mans, gated, name := map[string][]string{}, map[string][]string{}, map[string][]string{}, map[string]string{}
 	for _, b := range s.bindings {
 		at, p := s.place[b.Volume], strings.TrimSuffix(b.KeyPrefix, "/")
-		if s.stores[b.Volume].Anonymous() || b.Gate != "" {
-			continue // a gated binding's builds are its groups', never collected
+		if s.stores[b.Volume].Anonymous() {
+			continue
 		}
 		if n, ok := name[at]; !ok || b.Volume < n {
 			name[at] = b.Volume
 		}
-		switch b.Format {
-		case "tarballs":
+		switch {
+		case b.Gate != "":
+			gated[at] = append(gated[at], p)
+		case b.Format == "tarballs":
 			tars[at] = append(tars[at], p)
-		case "manifests":
+		case b.Format == "manifests":
 			mans[at] = append(mans[at], p)
 		}
 	}
@@ -91,7 +94,6 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 		if why != "" {
 			continue
 		}
-		oldest := s.now().Add(-o.Grace)
 		roots, certified, err := s.index.Roots(ctx, bucket, s.manifestKeys.IDs())
 		if err != nil {
 			return nil, err
@@ -102,72 +104,118 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 			}
 			continue
 		}
-		arches, readSince, popularSince := map[string]*GCArch{}, s.now().Add(-o.Read), s.now().Add(-4*o.Read)
-		builds := map[string][]index.Object{} // the package files of each version, by architecture
-		for _, prefix := range slices.Compact(slices.Sorted(slices.Values(tars[bucket]))) {
-			skip := len(prefix) + 1
-			if prefix == "" {
-				skip = 0
-			}
-			err := s.index.Each(ctx, bucket, prefix, func(obj index.Object) {
-				rest := obj.Key[skip:]
-				arch, _, _ := strings.Cut(rest, "/")
-				a := arches[arch]
-				if a == nil {
-					a = &GCArch{Arch: arch, Certified: certified[arch]}
-					arches[arch] = a
-				}
-				m := packageKey.FindStringSubmatch(rest)
-				switch {
-				case m == nil || !strings.HasPrefix(m[3], m[2]):
-					a.Other++
-				case !a.Certified || roots[strings.ToLower(m[3])]:
-					a.Kept++
-					a.KeptBytes += obj.Size
-				case obj.Mtime.After(oldest):
-					a.Young++
-				case o.Read > 0 && obj.ReadAt.After(readSince),
-					o.Reads > 0 && obj.Reads >= int64(o.Reads) && obj.ReadAt.After(popularSince):
-					a.Read++
-				default:
-					a.sweep = append(a.sweep, obj)
-				}
-				if m != nil && strings.HasPrefix(m[3], m[2]) { // a package; one named otherwise is its own version
-					v := prefix + "\x00" + cmp.Or(versionOf(arch, m), "?"+obj.Key)
-					builds[v] = append(builds[v], obj)
-				}
-			})
-			if err != nil {
+		if err := s.planTree(ctx, p, tars[bucket], false, roots, certified, o); err != nil {
+			return nil, err
+		}
+	}
+	for _, bucket := range slices.Sorted(maps.Keys(gated)) {
+		p := &GCPlan{Volume: name[bucket], bucket: bucket}
+		plans = append(plans, p)
+		why, err := s.listedLately(ctx, bucket)
+		if p.Refused = why; err != nil {
+			return nil, err
+		}
+		if why == "" {
+			if err := s.planTree(ctx, p, gated[bucket], true, nil, nil, o); err != nil {
 				return nil, err
 			}
 		}
-		newest := newestBuilds(builds, o.KeepBuilds)
-		for _, k := range slices.Sorted(maps.Keys(arches)) {
-			a := arches[k]
-			p.Arches = append(p.Arches, a)
-			sweep := a.sweep[:0]
-			for _, f := range a.sweep {
-				if newest[f.Key] {
-					a.Newest++
-				} else {
-					sweep = append(sweep, f)
-					a.Sweep++
-					a.SweepBytes += f.Size
-				}
-			}
-			a.sweep = sweep
-			if all := a.Kept + a.Young + a.Read + a.Newest + a.Sweep; a.Sweep > 0 && float64(a.Sweep) > o.Max*float64(all) && p.Refused == "" {
-				p.Refused = fmt.Sprintf("%s: %d of its %d packages would go, more than %g of them", k, a.Sweep, all, o.Max)
-			}
-		}
-		if since, err := s.index.ReadsSince(ctx); err != nil {
-			return nil, err
-		} else if o.Read > 0 && s.now().Sub(since) < o.Read && p.Refused == "" {
-			p.Refused = fmt.Sprintf("reads are counted since %s only: not before %s (or -gc-read 0)",
-				since.UTC().Format(time.DateOnly), since.Add(o.Read).UTC().Format(time.DateOnly))
-		}
 	}
 	return plans, nil
+}
+
+// planTree plans the packages under prefixes of p's bucket by architecture (by
+// group and architecture, a folder each, when grouped: all may go, no roots).
+func (s *Server) planTree(ctx context.Context, p *GCPlan, prefixes []string, grouped bool,
+	roots, certified map[string]bool, o GCOptions) error {
+	oldest := s.now().Add(-o.Grace)
+	arches, readSince, popularSince := map[string]*GCArch{}, s.now().Add(-o.Read), s.now().Add(-4*o.Read)
+	builds := map[string][]index.Object{} // the package files of each version, by architecture
+	for _, prefix := range slices.Compact(slices.Sorted(slices.Values(prefixes))) {
+		skip := len(prefix) + 1
+		if prefix == "" {
+			skip = 0
+		}
+		err := s.index.Each(ctx, p.bucket, prefix, func(obj index.Object) {
+			rest, group := obj.Key[skip:], ""
+			if grouped {
+				group, rest, _ = strings.Cut(rest, "/")
+				group += "/"
+			}
+			arch, _, _ := strings.Cut(rest, "/")
+			a := arches[group+arch]
+			if a == nil {
+				a = &GCArch{Arch: group + arch, Certified: grouped || certified[arch]}
+				arches[group+arch] = a
+			}
+			m := packageKey.FindStringSubmatch(rest)
+			if grouped && !groupName.MatchString(strings.TrimSuffix(group, "/")) {
+				m = nil // not under a group: never read through the service, never swept
+			}
+			switch {
+			case m == nil || !strings.HasPrefix(m[3], m[2]):
+				a.Other++
+			case !a.Certified || roots[strings.ToLower(m[3])]:
+				a.Kept++
+				a.KeptBytes += obj.Size
+			case obj.Mtime.After(oldest):
+				a.Young++
+			case o.Read > 0 && obj.ReadAt.After(readSince),
+				o.Reads > 0 && obj.Reads >= int64(o.Reads) && obj.ReadAt.After(popularSince):
+				a.Read++
+			default:
+				a.sweep = append(a.sweep, obj)
+			}
+			if m != nil && strings.HasPrefix(m[3], m[2]) { // a package; one named otherwise is its own version
+				v := prefix + "\x00" + group + cmp.Or(versionOf(arch, m), "?"+obj.Key)
+				builds[v] = append(builds[v], obj)
+			}
+		})
+		if err != nil {
+			return err
+		}
+	}
+	newest := newestBuilds(builds, o.KeepBuilds)
+	for _, k := range slices.Sorted(maps.Keys(arches)) {
+		a := arches[k]
+		p.Arches = append(p.Arches, a)
+		sweep := a.sweep[:0]
+		for _, f := range a.sweep {
+			if newest[f.Key] {
+				a.Newest++
+			} else {
+				sweep = append(sweep, f)
+				a.Sweep++
+				a.SweepBytes += f.Size
+			}
+		}
+		a.sweep = sweep
+		if all := a.Kept + a.Young + a.Read + a.Newest + a.Sweep; a.Sweep > 0 && float64(a.Sweep) > o.Max*float64(all) && p.Refused == "" {
+			p.Refused = fmt.Sprintf("%s: %d of its %d packages would go, more than %g of them", k, a.Sweep, all, o.Max)
+		}
+	}
+	if since, err := s.index.ReadsSince(ctx); err != nil {
+		return err
+	} else if o.Read > 0 && s.now().Sub(since) < o.Read && p.Refused == "" {
+		p.Refused = fmt.Sprintf("reads are counted since %s only: not before %s (or -gc-read 0)",
+			since.UTC().Format(time.DateOnly), since.Add(o.Read).UTC().Format(time.DateOnly))
+	}
+	return nil
+}
+
+// listedLately says why a bucket's index may not stand for it ("" when it may):
+// never listed, or not lately.
+func (s *Server) listedLately(ctx context.Context, bucket string) (string, error) {
+	at, _, ok, err := s.index.Verified(ctx, bucket)
+	switch {
+	case err != nil:
+		return "", err
+	case !ok:
+		return "it was never listed", nil
+	case s.now().Sub(at) > s.verifyEvery+2*time.Hour:
+		return fmt.Sprintf("its last listing is %s old", s.now().Sub(at).Round(time.Minute)), nil
+	}
+	return "", nil
 }
 
 // gcRefused says why a bucket's index may not stand for the store, "" when it may:
@@ -178,15 +226,8 @@ func (s *Server) gcRefused(ctx context.Context, bucket, volume string, mans []st
 	if keys == "" {
 		return "no manifest_keys: no common manifest is verified", nil
 	}
-	at, _, ok, err := s.index.Verified(ctx, bucket)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "it was never listed", nil
-	}
-	if age := s.now().Sub(at); age > s.verifyEvery+2*time.Hour {
-		return fmt.Sprintf("its last listing is %s old", age.Round(time.Minute)), nil
+	if why, err := s.listedLately(ctx, bucket); why != "" || err != nil {
+		return why, err
 	}
 	if n, err := s.index.Unread(ctx, bucket); err != nil || n > 0 {
 		return fmt.Sprintf("%d manifests could not be read, or not all of their packages", n), err

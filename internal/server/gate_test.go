@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -191,15 +192,66 @@ func TestTheGateHoldsBuildsOnly(t *testing.T) {
 	}
 }
 
-// The collection plan leaves a gated binding's builds alone.
-func TestGCLeavesTheGate(t *testing.T) {
-	s, m, _, plan := gcSetup(t)
-	gate(s).Gate = "group"
-	m.objs["TT/lhcb/el9/store/bb/bb22/b-1-1.el9.tar.gz"] = []byte("theirs")
-	s.verifyDue(context.Background(), map[string]time.Time{})
-	if p := plan(); len(p.Arches) != 0 {
-		t.Fatalf("%+v", p.Arches[0])
+// A gated binding's builds (its own bucket) are planned by group and architecture,
+// without manifests: kept when young, read lately or among the newest of their version.
+func TestGCPlansTheGate(t *testing.T) {
+	s, _, x, _ := gcSetup(t)
+	ctx := context.Background()
+	g := gate(s)
+	g.Gate, g.Volume = "group", "priv"
+	s.stores["priv"], s.place["priv"] = newMem(), "https://s3.example.org priv"
+	at, old := s.place["priv"], s.now().Add(-100*24*time.Hour)
+	put := func(key string, mtime time.Time) {
+		x.Put(ctx, at, index.Object{Key: key, Size: 1, ETag: "e", Mtime: mtime}, s.now())
 	}
+	for _, r := range []string{"1", "2", "3", "4"} { // the 3 newest builds of x 1 stay
+		put("TT/lhcb/el9/store/aa/aa"+r+"/x-1-"+r+".el9.tar.gz", old.Add(time.Duration(len(r)+int(r[0]))*time.Hour))
+	}
+	put("TT/lhcb/el9/store/bb/bb1/y-1-1.el9.tar.gz", old)      // read lately
+	put("TT/lhcb/el9/store/bb/bb2/z-1-1.el9.tar.gz", old)      // alone in its version: its newest
+	put("TT/atlas/el9/store/cc/cc1/x-1-1.el9.tar.gz", s.now()) // young
+	put("TT/Bad_Group/el9/store/dd/dd1/x-1-1.el9.tar.gz", old) // not under a group: never
+	x.AddReads(ctx, map[[2]string]index.Read{{at, "TT/lhcb/el9/store/bb/bb1/y-1-1.el9.tar.gz"}: {N: 1, Last: s.now()}})
+	x.Verify(ctx, at, s.now().Add(-time.Minute), func(func(index.Object) error) error { return nil })
+	plans, err := s.PlanGC(ctx, GCOptions{Grace: 7 * 24 * time.Hour, Read: 30 * 24 * time.Hour, KeepBuilds: 3, Max: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var p *GCPlan
+	for _, q := range plans {
+		if q.bucket == at {
+			p = q
+		}
+	}
+	if p == nil || len(p.Arches) != 3 || p.Arches[0].Arch != "Bad_Group/el9" || p.Arches[0].Other != 1 ||
+		p.Arches[1].Arch != "atlas/el9" || p.Arches[2].Arch != "lhcb/el9" {
+		t.Fatalf("%+v", p)
+	}
+	p.Arches = p.Arches[1:]
+	lhcb := p.Arches[1]
+	var gone []string
+	for _, o := range lhcb.sweep {
+		gone = append(gone, o.Key)
+	}
+	if p.Arches[0].Young != 1 || lhcb.Read != 1 || lhcb.Newest != 4 || !slices.Equal(gone, []string{
+		"TT/lhcb/el9/store/aa/aa1/x-1-1.el9.tar.gz"}) {
+		t.Fatalf("%+v %+v %v", p.Arches[0], lhcb, gone)
+	}
+	// refused: too much of a group to go; reads counted too short a time; not listed lately
+	refused := func(o GCOptions, why string) {
+		t.Helper()
+		plans, _ := s.PlanGC(ctx, o)
+		for _, q := range plans {
+			if q.bucket == at && strings.Contains(q.Refused, why) {
+				return
+			}
+		}
+		t.Fatalf("not refused for %q", why)
+	}
+	refused(GCOptions{Grace: 7 * 24 * time.Hour, Read: 30 * 24 * time.Hour, KeepBuilds: 3, Max: 0.1}, "more than 0.1")
+	refused(GCOptions{Grace: 7 * 24 * time.Hour, Read: 900 * 24 * time.Hour, Max: 1}, "reads are counted since")
+	s.now = func() time.Time { return time.Now().Add(400 * 24 * time.Hour) }
+	refused(GCOptions{Grace: 7 * 24 * time.Hour, Max: 1}, "last listing")
 }
 
 // Each build stored behind a gate carries its signature: of its architecture, hash,

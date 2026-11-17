@@ -47,7 +47,13 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   the build in the token's group, then in those that list it among their `readers`
   (`{"sft": ["lhcb", "atlas"]}`, by name); else `404`. Groups are plain names
   (`[a-z0-9][a-z0-9._-]*`, up to 64). Builds not under a group are not read: a gate
-  starts on an empty prefix. The collection plan leaves these builds alone.
+  starts on an empty prefix. The collection plan takes these builds by group and
+  architecture (`<group>/<arch>`), without manifests: no root keeps one, nor
+  certification, only age, reads and the newest builds of each version (with
+  `-gc-keep-builds 0`, a version's only build may go: it is rebuilt when needed);
+  refused while its bucket was not listed lately, reads are counted for less than
+  `-gc-read`, or one group's architecture has more than `-gc-max` to go. Files not
+  under a group name are never planned.
   Each is signed when its upload starts, by a security-proxy sign route
   (`restricted_signer`: `agent_socket`, `route`, `host`, `prefix`, found as
   bits-console finds its own; required with a gate), its key never on this host:
