@@ -172,7 +172,8 @@ func TestGatedBuildsByArchitecture(t *testing.T) {
 	x.Verify(ctx, at, s.now().Add(-1), func(func(index.Object) error) error { return nil })
 	w := do(s, "GET", "/metrics", nil)
 	body := w.Body.String()
-	if !strings.Contains(body, `bits_store_bytes{volume="s3",arch="x86_64-el9"} 12`) || strings.Contains(body, `arch="lhcb"`) {
+	if !strings.Contains(body, `bits_store_bytes{volume="s3",arch="x86_64-el9"} 12`) || strings.Contains(body, `arch="lhcb"`) ||
+		!strings.Contains(body, `manifest="(restricted)",arch="x86_64-el9",signed="0"} 7`) {
 		t.Fatalf("%d\n%s", w.Code, body)
 	}
 }

@@ -114,8 +114,9 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `bits_store_bytes_total`; `bits_store_manifest_objects` and `_bytes` by `manifest`,
   `arch` and `signed`: a package goes to the first build (by id) whose BOM lists it
   among the sources of verified common manifests (of all, without `manifest_keys`),
-  `signed` when a verified one names it, else to `(uncertified)`; what its last
-  listing found (`bits_store_index_drift`, `kind` missing, changed or extra) and when
+  `signed` when a verified one names it, else to `(uncertified)` (`(restricted)` behind
+  a gate); what its last listing found (`bits_store_index_drift`, `kind` missing,
+  changed or extra) and when
   it began (`bits_store_index_verified_seconds`); `bits_store_index_errors_total`,
   the writes the index failed to record. Scrapes within a minute share one answer.
 - Reads: each `GET` the service redirects counts for its object in the index (how many

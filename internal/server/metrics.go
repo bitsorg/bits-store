@@ -122,7 +122,8 @@ func (s *Server) collect(ctx context.Context) (map[string][]string, error) {
 // collectPackages sums a bucket's packages (under its tarballs prefixes) by
 // architecture, and by the certified build first listing each (by architecture and
 // hash): certified by a verified common manifest, by any without manifest keys; the
-// rest is "(uncertified)". One pass, so that both splits add up to the same.
+// rest is "(uncertified)", or "(restricted)" behind a gate (never in a manifest). One
+// pass, so that both splits add up to the same.
 func (s *Server) collectPackages(ctx context.Context, bucket, vol string, prefixes []string,
 	add func(name, labels string, v int64)) error {
 	owner, signed, err := s.index.Certified(ctx, bucket, s.manifestKeys.IDs())
@@ -147,7 +148,9 @@ func (s *Server) collectPackages(ctx context.Context, bucket, vol string, prefix
 				return
 			}
 			b := "(uncertified)"
-			if len(seg) >= 5 && seg[1] == "store" {
+			if grouped {
+				b = "(restricted)"
+			} else if len(seg) >= 5 && seg[1] == "store" {
 				b = cmp.Or(owner[[2]string{seg[0], seg[3]}], b)
 			}
 			c := sums[key{b, seg[0]}]
