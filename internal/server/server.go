@@ -59,6 +59,7 @@ type Server struct {
 	manifestKeys index.Keys   // the common manifests' signing keys
 	reads        *readTable   // GETs redirected, for the index
 	signer       *proxySigner // signs a gated binding's builds; nil: none
+	withdrawn    *withdrawals // builds withdrawn through the admin API; nil: none (no -data)
 }
 
 // New builds a Server from a checked configuration.

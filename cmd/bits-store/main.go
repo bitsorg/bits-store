@@ -78,6 +78,9 @@ func main() {
 			log.Fatal(err)
 		}
 		h.UseIndex(x)
+		if err := h.UseWithdrawals(filepath.Join(*data, "withdrawn.json")); err != nil {
+			log.Fatal(err) // never serve builds withdrawn, unread
+		}
 		go h.Verify()
 		go h.FlushReads()
 	}

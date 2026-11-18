@@ -7,10 +7,12 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -417,5 +419,152 @@ func TestAdminAccess(t *testing.T) {
 	writeConfig(t, path, c)
 	if ok, err := r.Check(); !ok || err != nil || len(r.cur.Load().access.Bindings) != 2 {
 		t.Fatalf("reloaded: %v %v %+v", ok, err, r.cur.Load().access.Bindings)
+	}
+}
+
+// An admin withdraws a gated binding's build (PUT, with why), kept in the file beside
+// the index: reads find none from then on, until the withdrawal is lifted.
+func TestAdminWithdraws(t *testing.T) {
+	s, m, tok := gated(t)
+	file := filepath.Join(t.TempDir(), "withdrawn.json")
+	var err error
+	if s.withdrawn, err = openWithdrawals(file); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte("tarball")
+	sum := sha256.Sum256(data)
+	sha := "sha256:" + hex.EncodeToString(sum[:])
+	m.objs[filed("lhcb")], m.meta[filed("lhcb")] = data, map[string]string{"sha256": sha}
+	read := func() int {
+		return do(s, "GET", tarPath, map[string]string{"Authorization": "Bearer " + tok}).Code
+	}
+	admin := adminToken(t, s, "admin:alice", time.Minute, "PUT /_admin/withdraw", "PUT /_admin/lift", "GET /_admin/**")
+	put := func(path, body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("PUT", path, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+admin)
+		w := httptest.NewRecorder()
+		s.ServeAdmin(w, r)
+		return w
+	}
+	g := gate(s).Prefix
+	body := func(f map[string]string) string {
+		b, _ := json.Marshal(f)
+		return string(b)
+	}
+	ungated := ""
+	for _, b := range s.bindings {
+		if b.Gate == "" && b.Format == "tarballs" {
+			ungated = b.Prefix
+		}
+	}
+	if ungated == "" {
+		t.Fatal("no ungated tarballs binding")
+	}
+	good := map[string]string{"binding": g, "sha256": sha, "key": filed("lhcb"), "why": "a licence"}
+	for name, c := range map[string]struct {
+		body string
+		code int
+	}{
+		"ungated":       {body(map[string]string{"binding": ungated, "sha256": sha, "why": "x"}), 400},
+		"no binding":    {body(map[string]string{"binding": "/nowhere", "sha256": sha, "why": "x"}), 404},
+		"bare hex":      {body(map[string]string{"binding": g, "sha256": sha[7:], "why": "x"}), 400},
+		"no why":        {body(map[string]string{"binding": g, "sha256": sha, "why": " "}), 400},
+		"key elsewhere": {body(map[string]string{"binding": g, "sha256": sha, "why": "x", "key": "OTHER/x"}), 400},
+		"unknown field": {body(map[string]string{"binding": g, "sha256": sha, "why": "x", "who": "x"}), 400},
+		"two bodies":    {body(good) + body(good), 400},
+	} {
+		if w := put("/_admin/withdraw", c.body); w.Code != c.code {
+			t.Errorf("%s: want %d, got %d %s", name, c.code, w.Code, w.Body)
+		}
+	}
+	if read() != 302 || s.withdrawn.any(g) {
+		t.Fatal("refused requests withdrew something")
+	}
+	if w := doAdmin(s, "GET", "/_admin/withdraw", map[string]string{"Authorization": "Bearer " + admin}); w.Code != 405 {
+		t.Fatalf("GET withdraw: %d", w.Code)
+	}
+	wide := adminToken(t, s, "admin:alice", time.Minute, "PUT /_admin/**")
+	if w := doAdmin(s, "PUT", "/_admin/summary", map[string]string{"Authorization": "Bearer " + wide}); w.Code != 405 {
+		t.Fatalf("PUT summary: %d", w.Code)
+	}
+	if w := doAdmin(s, "PUT", "/_admin/nothing", map[string]string{"Authorization": "Bearer " + wide}); w.Code != 404 {
+		t.Fatalf("PUT elsewhere: %d", w.Code)
+	}
+	if w := put("/_admin/withdraw", body(map[string]string{"binding": g, "sha256": sha, "why": strings.Repeat("x", 5000)})); w.Code != 400 {
+		t.Fatalf("a body past 4 KiB: %d", w.Code)
+	}
+	reader := adminToken(t, s, "admin:bob", time.Minute, "GET /_admin/**")
+	r := httptest.NewRequest("PUT", "/_admin/withdraw", strings.NewReader(body(good)))
+	r.Header.Set("Authorization", "Bearer "+reader)
+	rec := httptest.NewRecorder()
+	if s.ServeAdmin(rec, r); rec.Code != 403 {
+		t.Fatalf("a token allowed only GETs withdrew: %d", rec.Code)
+	}
+
+	w := put("/_admin/withdraw", body(good))
+	var got struct {
+		Withdrawal Withdrawal
+		Added      bool
+	}
+	if json.Unmarshal(w.Body.Bytes(), &got); w.Code != 200 || !got.Added || got.Withdrawal.By != "admin:alice" || got.Withdrawal.Why != "a licence" {
+		t.Fatalf("withdraw: %d %s", w.Code, w.Body)
+	}
+	if read() != 404 {
+		t.Fatal("a withdrawn build read")
+	}
+	again := put("/_admin/withdraw", body(map[string]string{"binding": g, "sha256": sha, "why": "again"}))
+	if json.Unmarshal(again.Body.Bytes(), &got); again.Code != 200 || got.Added || got.Withdrawal.Why != "a licence" {
+		t.Fatalf("withdrawn twice: %d %s", again.Code, again.Body)
+	}
+	if w := doAdmin(s, "GET", "/_admin/withdrawn", map[string]string{"Authorization": "Bearer " + admin}); w.Code != 200 || !strings.Contains(w.Body.String(), sha) {
+		t.Fatalf("the list: %d %s", w.Code, w.Body)
+	}
+	// kept beside the index: a service started again withdraws it too
+	if again, err := openWithdrawals(file); err != nil || !again.has(g, sha) || len(again.list) != 1 {
+		t.Fatalf("not kept: %v %v", err, again)
+	}
+
+	if w := put("/_admin/lift", body(map[string]string{"binding": g, "sha256": sha})); w.Code != 200 || !strings.Contains(w.Body.String(), `"denied":false`) {
+		t.Fatalf("lift: %d %s", w.Code, w.Body)
+	}
+	if read() != 302 {
+		t.Fatal("a lifted withdrawal still withdraws")
+	}
+	if w := put("/_admin/lift", body(map[string]string{"binding": g, "sha256": sha})); w.Code != 404 {
+		t.Fatalf("lifted twice: %d", w.Code)
+	}
+	if again, err := openWithdrawals(file); err != nil || again.has(g, sha) {
+		t.Fatalf("the lift not kept: %v", err)
+	}
+	// the configuration's deny is not lifted here
+	gate(s).deny = map[string]bool{sha: true}
+	put("/_admin/withdraw", body(good))
+	if w := put("/_admin/lift", body(map[string]string{"binding": g, "sha256": sha})); !strings.Contains(w.Body.String(), `"denied":true`) || read() != 404 {
+		t.Fatalf("lifted past the configuration: %s", w.Body)
+	}
+	// a file that cannot be written: refused, nothing withdrawn
+	gate(s).deny = nil
+	s.withdrawn.path = filepath.Join(t.TempDir(), "gone", "withdrawn.json")
+	if w := put("/_admin/withdraw", body(good)); w.Code != 500 || s.withdrawn.any(g) || read() != 302 {
+		t.Fatalf("withdrawn without being kept: %d", w.Code)
+	}
+}
+
+// A file that cannot be read stops the start: never serve builds withdrawn, unread.
+func TestWithdrawalsFile(t *testing.T) {
+	dir := t.TempDir()
+	for name, content := range map[string]string{
+		"not JSON":   "{",
+		"bare hex":   `{"withdrawn": [{"binding": "/r", "sha256": "` + strings.Repeat("ab", 32) + `"}]}`,
+		"no binding": `{"withdrawn": [{"sha256": "sha256:` + strings.Repeat("ab", 32) + `"}]}`,
+	} {
+		p := filepath.Join(dir, name)
+		os.WriteFile(p, []byte(content), 0o600)
+		if _, err := openWithdrawals(p); err == nil {
+			t.Errorf("%s: read", name)
+		}
+	}
+	if w, err := openWithdrawals(filepath.Join(dir, "none")); err != nil || len(w.all()) != 0 {
+		t.Fatalf("no file yet: %v", err)
 	}
 }

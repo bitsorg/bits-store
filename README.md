@@ -69,7 +69,9 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   denied`), even one started before (one already being stored may still land, not
   read), so they are never signed again. The object stays until deleted, and with it
   the hash's folder: delete it so that a rebuild (other bytes) is stored. Build hosts
-  keep what they downloaded.
+  keep what they downloaded. The admin API withdraws builds the same way, at once
+  (`PUT /_admin/withdraw`); as with `deny`, a URL handed out before stays good until it
+  expires (`url_lifetime`).
 - `manifests` is bits' `MANIFESTS` area: the path is the key, as `blob` (the signed
   common manifests), and `GET <prefix>/rev-index/<arch>/<pkg>/<version>?revisions`
   answers `{revision: hash}` from that version's revision markers
@@ -118,7 +120,8 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   with `-data`; off without it), never on the store's; plain HTTP, so bind it to an
   internal network the console alone shares. A request needs an
   `Authorization: Bearer` token of a key whose `signer` is `admin` (`sub`
-  `admin:<user>`), living 15 minutes at most and allowed the path (`GET /_admin/**`);
+  `admin:<user>`), living 15 minutes at most and allowed the method and path
+  (`GET /_admin/**`; an action `PUT /_admin/<action>`);
   such a token opens no store path. Each request is logged. `GET /_admin/summary`:
   for each bucket (named by its first volume) when it was last listed, its drift and
   totals, and each binding's objects and bytes, those read in the last 30 days, a
@@ -149,6 +152,14 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   the environment); each binding with its gate, `readers` and `deny`; the manifest
   keys' ids; the restricted builds' signer route; the fetch budgets and trusted
   domains (not the site's addresses).
+  `PUT /_admin/withdraw` `{"binding", "sha256", "why", "key"}` withdraws a gated
+  binding's build as its `deny` does, from then on (`key`, optional: the object it was
+  seen as); a build withdrawn already keeps its first record (`added` false).
+  `PUT /_admin/lift` `{"binding", "sha256"}` lifts one (`denied` true when `deny` in
+  config.json still withdraws it). `GET /_admin/withdrawn` lists them, each with who
+  (`by`, the token's `sub`), when and why. They are kept in `withdrawn.json` beside
+  the index (`-data`), not in it: an index dropped and listed again gives none back; a
+  file that cannot be read stops the start.
 - `/metrics` (with the index; Prometheus text, no token: block it in front, for the
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first

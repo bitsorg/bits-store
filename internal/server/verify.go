@@ -21,6 +21,15 @@ const (
 // UseIndex gives the running Server, and those of later reloads, the index.
 func (r *Reloader) UseIndex(x *index.Index) { r.cur.Load().index = x }
 
+// UseWithdrawals reads the builds withdrawn through the admin API from path (-data's).
+func (r *Reloader) UseWithdrawals(path string) error {
+	w, err := openWithdrawals(path)
+	if err == nil {
+		r.cur.Load().withdrawn = w
+	}
+	return err
+}
+
 // Verify lists each keyed bucket against the index, one at a time: when it was
 // never verified, then every index_verify; then reads the manifests. It never returns.
 func (r *Reloader) Verify() {

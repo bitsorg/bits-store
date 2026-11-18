@@ -151,7 +151,7 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 	if left < minTokenLeft {
 		return failMsg(w, http.StatusUnauthorized, "token-expiring")
 	}
-	if b.deny["sha256:"+req.SHA256] {
+	if s.denied(b, "sha256:"+req.SHA256) {
 		return failMsg(w, http.StatusForbidden, "denied") // withdrawn: never signed again
 	}
 	st := s.stores[b.Volume]
@@ -225,7 +225,7 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request, b *Bindi
 	if u == nil {
 		return fail(w, http.StatusNotFound)
 	}
-	if b.deny["sha256:"+u.sha256] && !s.uploads.isDone(id) {
+	if s.denied(b, "sha256:"+u.sha256) && !s.uploads.isDone(id) {
 		s.uploads.expire(id) // its staging object removed with the expired ones
 		return failMsg(w, http.StatusForbidden, "denied")
 	}

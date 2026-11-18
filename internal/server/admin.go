@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"net/http"
@@ -29,6 +30,10 @@ const (
 	readLately    = 30 * 24 * time.Hour
 )
 
+// adminViews are the admin API's GETs; its actions (PUT) are withdraw and lift.
+var adminViews = map[string]bool{adminPrefix + "summary": true, adminPrefix + "objects": true,
+	adminPrefix + "object": true, adminPrefix + "access": true, adminPrefix + "withdrawn": true}
+
 // ServeAdmin answers the admin API with the current Server.
 func (r *Reloader) ServeAdmin(w http.ResponseWriter, req *http.Request) {
 	r.cur.Load().ServeAdmin(w, req)
@@ -49,8 +54,9 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 	if !strings.HasPrefix(p, adminPrefix) {
 		return fail(w, http.StatusNotFound), nil, p
 	}
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", "GET, HEAD")
+	write := r.Method == http.MethodPut // an action, its JSON in the body
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !write {
+		w.Header().Set("Allow", "GET, HEAD, PUT")
 		return fail(w, http.StatusMethodNotAllowed), nil, p
 	}
 	segs, err := token.ParsePath(p)
@@ -72,7 +78,24 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 	case !t.Allows(r.Method, segs):
 		return fail(w, http.StatusForbidden), t, p
 	}
+	if acts := p == adminPrefix+"withdraw" || p == adminPrefix+"lift"; acts != write && (acts || adminViews[p]) {
+		if acts {
+			w.Header().Set("Allow", "PUT")
+		} else {
+			w.Header().Set("Allow", "GET, HEAD")
+		}
+		return fail(w, http.StatusMethodNotAllowed), t, p
+	}
 	switch p {
+	case adminPrefix + "withdraw":
+		return s.adminWithdraw(w, r, t), t, p
+	case adminPrefix + "lift":
+		return s.adminLift(w, r, t), t, p
+	case adminPrefix + "withdrawn":
+		if s.withdrawn == nil {
+			return fail(w, http.StatusNotFound), t, p
+		}
+		return writeJSON(w, map[string]any{"withdrawn": s.withdrawn.all()}), t, p
 	case adminPrefix + "summary":
 		return s.adminSummary(w, r), t, p
 	case adminPrefix + "objects":
@@ -640,4 +663,87 @@ func accessOf(c *Config, bs []Binding, mkeys index.Keys) Access {
 		a.ManifestKeys = strings.Split(ids, ",")
 	}
 	return a
+}
+
+// adminWithdraw withdraws a gated binding's build (PUT {"binding", "sha256", "key",
+// "why"}) as its deny would, from now on; kept in -data's withdrawn.json.
+func (s *Server) adminWithdraw(w http.ResponseWriter, r *http.Request, t *token.Token) int {
+	var req struct {
+		Binding string `json:"binding"`
+		SHA256  string `json:"sha256"`
+		Key     string `json:"key"`
+		Why     string `json:"why"`
+	}
+	if !readJSON(w, r, &req) {
+		return failMsg(w, http.StatusBadRequest, "body")
+	}
+	b, why := s.binding(req.Binding), strings.TrimSpace(req.Why)
+	switch {
+	case s.withdrawn == nil:
+		return fail(w, http.StatusNotFound)
+	case b == nil:
+		return failMsg(w, http.StatusNotFound, "no such binding")
+	case b.Gate == "":
+		return failMsg(w, http.StatusBadRequest, "binding: a gated one") // others are read from the bucket itself
+	case !validSHA256(req.SHA256):
+		return failMsg(w, http.StatusBadRequest, "sha256")
+	case why == "" || len(why) > 500:
+		return failMsg(w, http.StatusBadRequest, "why")
+	case req.Key != "" && (len(req.Key) > 1024 || !under(b, req.Key)):
+		return failMsg(w, http.StatusBadRequest, "key")
+	}
+	x, added, err := s.withdrawn.add(Withdrawal{req.Binding, req.SHA256, req.Key, t.Sub, s.now().UTC(), why})
+	if err != nil {
+		log.Printf("admin withdraw: %v", err)
+		return fail(w, http.StatusInternalServerError)
+	}
+	if added {
+		log.Printf("admin: %q withdrew %s from %q (%q): %q", t.Sub, x.SHA256, x.Binding, x.Key, x.Why)
+	}
+	return writeJSON(w, map[string]any{"withdrawal": x, "added": added})
+}
+
+// adminLift lifts a withdrawal (PUT {"binding", "sha256"}); denied stays true when
+// the binding's deny in config.json withdraws that build too.
+func (s *Server) adminLift(w http.ResponseWriter, r *http.Request, t *token.Token) int {
+	var req struct {
+		Binding string `json:"binding"`
+		SHA256  string `json:"sha256"`
+	}
+	if !readJSON(w, r, &req) {
+		return failMsg(w, http.StatusBadRequest, "body")
+	}
+	if s.withdrawn == nil {
+		return fail(w, http.StatusNotFound)
+	}
+	ok, err := s.withdrawn.lift(req.Binding, req.SHA256)
+	if err != nil {
+		log.Printf("admin lift: %v", err)
+		return fail(w, http.StatusInternalServerError)
+	} else if !ok {
+		return failMsg(w, http.StatusNotFound, "not withdrawn")
+	}
+	log.Printf("admin: %q lifted the withdrawal of %q from %q", t.Sub, req.SHA256, req.Binding)
+	b := s.binding(req.Binding)
+	return writeJSON(w, map[string]any{"lifted": true, "denied": b != nil && b.deny[req.SHA256]})
+}
+
+// under says whether key is one of b's objects.
+func under(b *Binding, key string) bool {
+	p := strings.TrimSuffix(b.KeyPrefix, "/")
+	return p == "" || strings.HasPrefix(key, p+"/")
+}
+
+// readJSON decodes a small JSON body (4 KiB at most, known fields only) into v.
+func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	d.DisallowUnknownFields()
+	return d.Decode(v) == nil && d.Decode(&struct{}{}) == io.EOF
+}
+
+func writeJSON(w http.ResponseWriter, v any) int {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	json.NewEncoder(w).Encode(v)
+	return http.StatusOK
 }

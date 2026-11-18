@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -298,9 +299,29 @@ func TestTheGateSignsItsBuilds(t *testing.T) {
 	}
 }
 
-// A denied build (by its sha256) is not read, nor stored again, nor completed once denied.
+// A denied build (by its sha256) is not read, nor stored again, nor completed once
+// denied: by the binding's deny, or withdrawn through the admin API.
 func TestTheGateDenies(t *testing.T) {
+	for _, how := range []string{"deny", "withdrawn"} {
+		t.Run(how, func(t *testing.T) { testTheGateDenies(t, how) })
+	}
+}
+
+func testTheGateDenies(t *testing.T, how string) {
 	s, m, tok := gated(t)
+	deny := func(shas ...string) {
+		if how == "deny" {
+			gate(s).deny = map[string]bool{}
+			for _, x := range shas {
+				gate(s).deny[x] = true
+			}
+			return
+		}
+		s.withdrawn = &withdrawals{path: filepath.Join(t.TempDir(), "withdrawn.json")}
+		for _, x := range shas {
+			s.withdrawn.list = append(s.withdrawn.list, Withdrawal{Binding: gate(s).Prefix, SHA256: x})
+		}
+	}
 	data := []byte("tarball")
 	sum := sha256.Sum256(data)
 	denied := "sha256:" + hex.EncodeToString(sum[:])
@@ -309,7 +330,7 @@ func TestTheGateDenies(t *testing.T) {
 	if w := do(s, "GET", tarPath, auth); w.Code != 302 {
 		t.Fatalf("no deny list: %d", w.Code)
 	}
-	gate(s).deny = map[string]bool{denied: true}
+	deny(denied)
 	for _, method := range []string{"GET", "HEAD"} {
 		if w := do(s, method, tarPath, auth); w.Code != 404 || w.Header().Get("Bits-Object-Group") != "" {
 			t.Fatalf("a denied build read: %s %d %v", method, w.Code, w.Header())
@@ -323,17 +344,17 @@ func TestTheGateDenies(t *testing.T) {
 	if w := post(s, tarPath+"?uploads", tok, named(tarName, data)); w.Code != 403 || !strings.Contains(w.Body.String(), "denied") {
 		t.Fatalf("a denied build stored again: %d %s", w.Code, w.Body)
 	}
-	gate(s).deny = nil
+	deny()
 	st := startNamed(t, s, tok, tarName, data)
 	m.upload("STAGING/"+st.ID, data)
-	gate(s).deny = map[string]bool{denied: true}
+	deny(denied)
 	if w := post(s, tarPath+"?complete="+st.ID, tok, ""); w.Code != 403 || m.has(filed("lhcb")) {
 		t.Fatalf("denied while uploading, yet stored: %d %s", w.Code, w.Body)
 	}
 	if w := post(s, tarPath+"?complete="+st.ID, tok, ""); w.Code != 404 {
 		t.Fatalf("a denied upload kept: %d %s", w.Code, w.Body)
 	}
-	gate(s).deny = map[string]bool{"sha256:" + strings.Repeat("0", 64): true}
+	deny("sha256:" + strings.Repeat("0", 64))
 	st = startNamed(t, s, tok, tarName, data)
 	m.upload("STAGING/"+st.ID, data)
 	if w := post(s, tarPath+"?complete="+st.ID, tok, ""); w.Code != 201 {
@@ -343,7 +364,8 @@ func TestTheGateDenies(t *testing.T) {
 		t.Fatalf("another build denied, this one not read: %d", w.Code)
 	}
 	// its own denied, a group it reads has a good one
-	gate(s).deny, gate(s).Readers = map[string]bool{denied: true}, map[string][]string{"atlas": {"lhcb"}}
+	deny(denied)
+	gate(s).Readers = map[string][]string{"atlas": {"lhcb"}}
 	m.objs[filed("atlas")], m.meta[filed("atlas")] = []byte("good"), map[string]string{"sha256": "sha256:" + strings.Repeat("1", 64)}
 	if w := do(s, "GET", tarPath, auth); w.Code != 302 || w.Header().Get("Bits-Object-Group") != "atlas" {
 		t.Fatalf("another group's good build not read: %d %v", w.Code, w.Header())

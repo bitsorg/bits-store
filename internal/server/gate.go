@@ -45,7 +45,7 @@ func (s *Server) gatedLookup(ctx context.Context, b *Binding, t *token.Token, di
 	for _, g := range readable(b, t) {
 		gb, gdir := within(b, g, dir)
 		key, err := s.found.lookup(ctx, s, gb, gdir, now)
-		if err == nil && key != "" && len(b.deny) > 0 {
+		if err == nil && key != "" && (len(b.deny) > 0 || s.withdrawn.any(b.Prefix)) {
 			key, err = s.notDenied(ctx, b, key)
 		}
 		if err != nil || key != "" {
@@ -59,10 +59,16 @@ func (s *Server) gatedLookup(ctx context.Context, b *Binding, t *token.Token, di
 // sha256 as stored, what its signature covers) or gone.
 func (s *Server) notDenied(ctx context.Context, b *Binding, key string) (string, error) {
 	fi, ok, err := s.stores[b.Volume].Stat(ctx, key)
-	if err != nil || !ok || b.deny[fi.Meta["sha256"]] {
+	if err != nil || !ok || s.denied(b, fi.Meta["sha256"]) {
 		return "", err
 	}
 	return key, nil
+}
+
+// denied says whether b withdraws the build stored with sha (sha256:<hex>): by its
+// deny, or through the admin API.
+func (s *Server) denied(b *Binding, sha string) bool {
+	return b.deny[sha] || s.withdrawn.has(b.Prefix, sha)
 }
 
 // grouped says whether a tarballs prefix of the bucket at is a gated binding's,
