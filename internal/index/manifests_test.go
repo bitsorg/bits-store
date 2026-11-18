@@ -153,18 +153,24 @@ func TestAnOlderIndexIsDropped(t *testing.T) {
 
 // A build counts when a common manifest naming it is verified with the keys now in
 // force (any common manifest, without keys); the first by id owns a shared object.
+// Only BOMs' entries count, and only those of the bucket asked, certified there.
 func TestCertified(t *testing.T) {
 	x, _ := open(t)
 	now := time.UnixMilli(1_000_000)
 	for k, m := range map[string]Manifest{
-		"M/a/x.json":                  {Kind: KindBOM, Builds: []string{"release_a"}, Entries: []Entry{{"el9", "h1", "", ""}, {"el9", "h2", "", ""}}},
-		"M/b/x.json":                  {Kind: KindBOM, Builds: []string{"release_b"}, Entries: []Entry{{"el9", "h1", "", ""}}},
-		"M/c/x.json":                  {Kind: KindBOM, Builds: []string{"release_c"}, Entries: []Entry{{"el10", "h3", "", ""}}},
-		"M/common-manifest-el9.json":  {Kind: KindCommon, Builds: []string{"release_b", "release_a"}, Keys: "k1", VerifiedBy: "k1"},
-		"M/common-manifest-el10.json": {Kind: KindCommon, Builds: []string{"release_c"}, Keys: "k1"},
+		"b M/a/x.json":                  {Kind: KindBOM, Builds: []string{"release_a"}, Entries: []Entry{{"el9", "h1", "", ""}, {"el9", "h2", "", ""}}},
+		"b M/b/x.json":                  {Kind: KindBOM, Builds: []string{"release_b"}, Entries: []Entry{{"el9", "h1", "", ""}}},
+		"b M/c/x.json":                  {Kind: KindBOM, Builds: []string{"release_c"}, Entries: []Entry{{"el10", "h3", "", ""}}},
+		"b M/n/x.json":                  {Kind: KindNone, Builds: []string{"release_a"}, Entries: []Entry{{"el9", "h4", "", ""}}},
+		"b M/d/x.json":                  {Kind: KindBOM, Builds: []string{"release_d"}, Entries: []Entry{{"el9", "h6", "", ""}}},
+		"b M/common-manifest-el9.json":  {Kind: KindCommon, Builds: []string{"release_b", "release_a"}, Keys: "k1", VerifiedBy: "k1"},
+		"b M/common-manifest-el10.json": {Kind: KindCommon, Builds: []string{"release_c"}, Keys: "k1"},
+		"o M/a/x.json":                  {Kind: KindBOM, Builds: []string{"release_a"}, Entries: []Entry{{"el9", "h5", "", ""}}},
+		"o M/common-manifest-el9.json":  {Kind: KindCommon, Builds: []string{"release_d"}, Keys: "k1", VerifiedBy: "k1"},
 	} {
-		m.Key, m.ETag, m.At = k, "e", now
-		if err := x.PutManifest(ctx, "b", m); err != nil {
+		bucket, key, _ := strings.Cut(k, " ")
+		m.Key, m.ETag, m.At = key, "e", now
+		if err := x.PutManifest(ctx, bucket, m); err != nil {
 			t.Fatal(err)
 		}
 	}

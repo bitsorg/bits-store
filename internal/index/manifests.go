@@ -234,15 +234,15 @@ func (x *Index) VerifiedBy(ctx context.Context, bucket, key string) (string, err
 // only those count; without, every common manifest does.
 func (x *Index) Certified(ctx context.Context, bucket, keys string) (owner map[[2]string]string, signed map[string]bool, err error) {
 	owner, signed = map[[2]string]string{}, map[string]bool{}
-	rows, err := x.db.QueryContext(ctx, `WITH certified AS (
-		  SELECT DISTINCT b.build_id FROM manifests m
-		  JOIN manifest_builds b ON b.bucket = m.bucket AND b.key = m.key
-		  WHERE m.bucket = ? AND m.kind = ? AND (? = '' OR m.keys = ? AND m.verified_by != ''))
-		SELECT e.arch, e.hash, min(c.build_id) FROM manifest_entries e
-		JOIN manifests m ON m.bucket = e.bucket AND m.key = e.key AND m.kind = ?
-		JOIN manifest_builds b ON b.bucket = e.bucket AND b.key = e.key
-		JOIN certified c ON c.build_id = b.build_id
-		WHERE e.bucket = ? GROUP BY e.arch, e.hash`, bucket, KindCommon, keys, keys, KindBOM, bucket)
+	// From the BOMs' builds (few) to their entries, in that order (CROSS JOIN): led by
+	// the entries, SQLite ran the certified builds' query again for each (seconds).
+	rows, err := x.db.QueryContext(ctx, `SELECT e.arch, e.hash, min(b.build_id) FROM manifest_builds b
+		CROSS JOIN manifests m ON m.bucket = b.bucket AND m.key = b.key AND m.kind = ?
+		CROSS JOIN manifest_entries e ON e.bucket = b.bucket AND e.key = b.key
+		WHERE b.bucket = ? AND b.build_id IN (SELECT cb.build_id FROM manifests cm
+		  JOIN manifest_builds cb ON cb.bucket = cm.bucket AND cb.key = cm.key
+		  WHERE cm.bucket = ? AND cm.kind = ? AND (? = '' OR cm.keys = ? AND cm.verified_by != ''))
+		GROUP BY e.arch, e.hash`, KindBOM, bucket, bucket, KindCommon, keys, keys)
 	if err != nil {
 		return nil, nil, err
 	}
