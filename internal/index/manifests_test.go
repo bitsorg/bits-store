@@ -201,6 +201,15 @@ func TestOpenReadOnly(t *testing.T) {
 	if err := y.Put(ctx, "b", Object{Key: "k2", Size: 1, ETag: "e"}, time.Now()); err == nil {
 		t.Fatal("written")
 	}
+	if err := y.Forget(ctx, "b", "k", "e"); err != nil { // left to the service's listing
+		t.Fatal(err)
+	}
+	if err := x.Forget(ctx, "b", "k", "other"); err != nil {
+		t.Fatal(err)
+	}
+	if c, _ := y.Total(ctx, "b"); c.Objects != 1 {
+		t.Fatal("forgotten read only, or with another ETag")
+	}
 	y.Close()
 	x.db.Exec(`PRAGMA user_version = 99`)
 	if _, err := OpenReadOnly(path); err == nil {

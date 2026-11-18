@@ -449,8 +449,12 @@ func TestGCApply(t *testing.T) {
 			t.Fatalf("%s deleted", k)
 		}
 	}
+	if _, ok := indexed(t, s, "s3", gone); ok {
+		t.Fatal("a deleted file still indexed")
+	}
 	// planned, then: other bytes of the same size in the bucket; read; listed by a new BOM
 	m.objs[gone] = []byte("not")
+	x.Put(ctx, s.place["s3"], index.Object{Key: gone, Size: 3, ETag: m.etag(gone), Mtime: s.now().Add(-30 * 24 * time.Hour)}, s.now())
 	plans := mustPlan(t, s, o)
 	write(gcFile{s.now().UTC(), fileOptions(o), []gcFileEntry{planned}})
 	m.etags[gone] = "other"

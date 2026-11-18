@@ -544,6 +544,7 @@ func (s *Server) ApplyGC(ctx context.Context, plans []*GCPlan, o GCOptions, name
 			keep(e, "changed in the bucket since planned")
 			failed = 0
 		default:
+			s.forgetDeleted(ctx, e.Bucket, e.Key, e.ETag)
 			fmt.Fprintf(out, "deleted: %s %s %s\n", e.Volume, e.Key, bytesOf(e.Size))
 			deleted, freed = deleted+1, freed+e.Size
 			failed = 0

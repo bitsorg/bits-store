@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -758,5 +759,114 @@ func TestAdminGCPlan(t *testing.T) {
 	rec := httptest.NewRecorder()
 	if s.ServeAdmin(rec, r); rec.Code != 403 {
 		t.Fatalf("a token allowed only GETs planned: %d", rec.Code)
+	}
+}
+
+// An admin applies a plan the service made: confirmed by its file count, in the
+// background as -gc-apply does, once to its end; its lines kept in the plan's log.
+func TestAdminGCApply(t *testing.T) {
+	s, m, _, _ := gcSetup(t)
+	ctx := context.Background()
+	var err error
+	if s.gc, err = openGCJobs(filepath.Join(t.TempDir(), "gc")); err != nil {
+		t.Fatal(err)
+	}
+	o := DefaultGC
+	o.Grace, o.KeepBuilds = 7*24*time.Hour, 0
+	plans, err := s.PlanGC(ctx, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, old := "20270214T080000Z-000001", "20270201T080000Z-000002"
+	if err := s.gc.save(id, "admin:bob", plans, o, s.now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.gc.save(old, "admin:bob", plans, o, s.now().Add(-8*24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	sum, _ := s.gc.summary(id)
+	var going []string
+	for _, p := range plans {
+		for _, a := range p.Arches {
+			for _, f := range a.sweep {
+				going = append(going, f.Key)
+			}
+		}
+	}
+	if sum.Files == 0 || sum.Files != len(going) {
+		t.Fatalf("nothing to go: %+v", sum)
+	}
+	admin := adminToken(t, s, "admin:alice", time.Minute, "PUT /_admin/gc/apply", "GET /_admin/**")
+	auth := map[string]string{"Authorization": "Bearer " + admin}
+	apply := func(code int, body string) {
+		t.Helper()
+		r := httptest.NewRequest("PUT", "/_admin/gc/apply", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+admin)
+		w := httptest.NewRecorder()
+		if s.ServeAdmin(w, r); w.Code != code {
+			t.Fatalf("%s: want %d, got %d %s", body, code, w.Code, w.Body)
+		}
+	}
+	wait := func() *GCJob {
+		for i := 0; ; i++ {
+			if j := s.gc.current(); j != nil && j.Ended != nil {
+				return j
+			} else if i > 500 {
+				t.Fatal("the job never ended")
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	n := strconv.Itoa(sum.Files)
+	apply(400, `{"id": "`+id+`"}`)
+	apply(400, `{"id": "`+id+`", "files": `+strconv.Itoa(sum.Files+1)+`}`)
+	apply(400, `{"id": "../index", "files": 1}`)
+	apply(404, `{"id": "20000101T000000Z-000000", "files": 1}`)
+	apply(409, `{"id": "`+old+`", "files": `+n+`}`) // planned more than gcPlanLife ago
+	s.gc.job = &GCJob{Kind: "plan"}
+	apply(409, `{"id": "`+id+`", "files": `+n+`}`)
+	s.gc.job = nil
+	for _, k := range going {
+		if !m.has(k) {
+			t.Fatalf("%s gone before the apply", k)
+		}
+	}
+	apply(202, `{"id": "`+id+`", "files": `+n+`}`)
+	if j := wait(); j.Kind != "apply" || j.Error != "" || j.By != "admin:alice" {
+		t.Fatalf("the job: %+v", j)
+	}
+	for _, k := range going {
+		if _, indexed := indexed(t, s, "s3", k); m.has(k) || indexed {
+			t.Errorf("%s not deleted, or still indexed", k)
+		}
+	}
+	if sum, _ := s.gc.summary(id); sum.Applied == nil || sum.Applied.Ended == nil || sum.Applied.Code != 0 || sum.Applied.By != "admin:alice" {
+		t.Fatalf("not recorded: %+v", sum.Applied)
+	}
+	w := doAdmin(s, "GET", "/_admin/gc/log?id="+id, auth)
+	if body := w.Body.String(); w.Code != 200 || !strings.Contains(body, "applied by admin:alice") || strings.Count(body, "deleted: ") != len(going) {
+		t.Fatalf("the log: %d %s", w.Code, body)
+	}
+	apply(409, `{"id": "`+id+`", "files": `+n+`}`) // to its end once
+	// an apply a restart stopped may be applied again: what is gone is said so
+	s.gc.applied(id, &GCApplied{By: "admin:alice", Started: s.now()})
+	apply(202, `{"id": "`+id+`", "files": `+n+`}`)
+	wait()
+	if body := doAdmin(s, "GET", "/_admin/gc/log?id="+id, auth).Body.String(); strings.Count(body, "applied by") != 2 ||
+		strings.Count(body, "deleted: ") != len(going) {
+		t.Fatalf("not applied again: %s", body)
+	}
+	// a long log: its last MiB, from a whole line
+	long := strings.Repeat("x", 99) + "\n"
+	os.WriteFile(filepath.Join(s.gc.dir, old+".log"), []byte(strings.Repeat(long, 11000)+"the end\n"), 0o644)
+	if body := doAdmin(s, "GET", "/_admin/gc/log?id="+old, auth).Body.String(); len(body) > 1<<20 || !strings.HasPrefix(body, long) ||
+		!strings.HasSuffix(body, "the end\n") {
+		t.Fatalf("the log's tail: %d bytes, %q", len(body), body[:20])
+	}
+	os.Remove(filepath.Join(s.gc.dir, old+".log"))
+	for target, code := range map[string]int{"/_admin/gc/log?id=..%2Findex": 400, "/_admin/gc/log?id=" + old: 404} {
+		if w := doAdmin(s, "GET", target, auth); w.Code != code {
+			t.Errorf("%s: want %d, got %d", target, code, w.Code)
+		}
 	}
 }

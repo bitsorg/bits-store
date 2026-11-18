@@ -38,8 +38,9 @@ type Drift struct {
 
 // Index is safe for concurrent use: one connection, so its writes never wait on a lock.
 type Index struct {
-	db     *sql.DB
-	errors atomic.Int64
+	db       *sql.DB
+	errors   atomic.Int64
+	readOnly bool // OpenReadOnly's
 }
 
 // schemaVersion is the tables' layout: a file of another is migrated or dropped (migrate).
@@ -118,7 +119,7 @@ func OpenReadOnly(path string) (*Index, error) {
 		db.Close()
 		return nil, fmt.Errorf("index %s: layout %d, not this release's %d (%v): run the service first", path, v, schemaVersion, err)
 	}
-	return &Index{db: db}, nil
+	return &Index{db: db, readOnly: true}, nil
 }
 
 // migrate makes the file's tables those of schemaVersion, in one transaction: a
@@ -201,8 +202,12 @@ func (x *Index) Put(ctx context.Context, bucket string, o Object, now time.Time)
 	return err
 }
 
-// Forget drops the bucket's row of a key the service deleted, as it was (its ETag).
+// Forget drops the bucket's row of a key the service deleted, as it was (its ETag);
+// read only (-gc's), it leaves that to the service's next listing.
 func (x *Index) Forget(ctx context.Context, bucket, key, etag string) error {
+	if x.readOnly {
+		return nil
+	}
 	_, err := x.db.ExecContext(ctx, `DELETE FROM objects WHERE bucket = ? AND key = ? AND etag = ?`, bucket, key, etag)
 	return err
 }

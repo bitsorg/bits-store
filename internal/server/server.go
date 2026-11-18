@@ -386,14 +386,13 @@ func (c *foundCache) lookup(ctx context.Context, s *Server, b *Binding, dir stri
 	return key, nil
 }
 
-// forget drops the hits on key of the bucket at: deleted here, not to be read again.
+// forget drops the hit on key of the bucket at (found in its folder): deleted here.
 func (c *foundCache) forget(at, key string) {
+	k := at + "\x00" + path.Dir(key)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for k, e := range c.hits {
-		if e.key == key && strings.HasPrefix(k, at+"\x00") {
-			delete(c.hits, k)
-		}
+	if c.hits[k].key == key {
+		delete(c.hits, k)
 	}
 }
 

@@ -34,9 +34,9 @@ const (
 var (
 	adminViews = map[string]bool{adminPrefix + "summary": true, adminPrefix + "objects": true,
 		adminPrefix + "object": true, adminPrefix + "access": true, adminPrefix + "withdrawn": true,
-		adminPrefix + "gc": true, adminPrefix + "gc/files": true}
+		adminPrefix + "gc": true, adminPrefix + "gc/files": true, adminPrefix + "gc/log": true}
 	adminActions = map[string]bool{adminPrefix + "withdraw": true, adminPrefix + "lift": true,
-		adminPrefix + "delete": true, adminPrefix + "gc/plan": true}
+		adminPrefix + "delete": true, adminPrefix + "gc/plan": true, adminPrefix + "gc/apply": true}
 )
 
 // ServeAdmin answers the admin API with the current Server.
@@ -100,6 +100,10 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 		return s.adminDelete(w, r, t), t, p
 	case adminPrefix + "gc/plan":
 		return s.adminGCPlan(w, r, t), t, p
+	case adminPrefix + "gc/apply":
+		return s.adminGCApply(w, r, t), t, p
+	case adminPrefix + "gc/log":
+		return s.adminGCLog(w, rawQuery), t, p
 	case adminPrefix + "gc":
 		return s.adminGC(w), t, p
 	case adminPrefix + "gc/files":
@@ -849,12 +853,17 @@ func (s *Server) adminDelete(w http.ResponseWriter, r *http.Request, t *token.To
 		log.Printf("admin delete: %q: %v", req.Key, err)
 		return fail(w, http.StatusBadGateway)
 	}
-	s.found.forget(bucket, req.Key)
-	if err := s.index.Forget(ctx, bucket, req.Key, o.ETag); err != nil {
-		log.Printf("admin delete: the index keeps %q until the next listing: %v", req.Key, err)
-	}
+	s.forgetDeleted(ctx, bucket, req.Key, o.ETag)
 	log.Printf("admin: %q deleted %q of %s (%d bytes, %s): %q", t.Sub, req.Key, bucket, o.Size, o.ETag, why)
 	return writeJSON(w, map[string]any{"deleted": req.Key, "size": o.Size})
+}
+
+// forgetDeleted drops a key deleted here from the found cache and the index.
+func (s *Server) forgetDeleted(ctx context.Context, bucket, key, etag string) {
+	s.found.forget(bucket, key)
+	if err := s.index.Forget(ctx, bucket, key, etag); err != nil {
+		log.Printf("the index keeps %q until the next listing: %v", key, err)
+	}
 }
 
 // keyed is the volume with keys for the bucket at (the first by name, as a

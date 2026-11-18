@@ -175,6 +175,16 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `GET /_admin/gc`: the job running (or the last: who, when, its error) and the last 10
   plans; `GET /_admin/gc/files?id=<id>`: a plan's files to go (`offset`, `limit` 100,
   at most 500; `total`).
+  `PUT /_admin/gc/apply` `{"id", "files"}` (`files`: the plan's count to go, as a
+  confirmation) applies it in the background as `-gc-apply` does (planned again now,
+  each file checked again): `202`; `400` for another count, `404` for no such plan;
+  `409` while a job runs, once applied to its end, or planned more than 7 days ago.
+  One a restart stopped, or that could not start (said in its log), may be applied
+  again. Its lines
+  go to `<id>.log` (`GET /_admin/gc/log?id=<id>`, the last MiB); its summary records
+  who, when and `-gc-apply`'s code. A file deleted by the service (an apply, `PUT
+  /_admin/delete`) leaves its index at once; `-gc-apply` on the host leaves that to the
+  next listing.
 - `/metrics` (with the index; Prometheus text, no token: block it in front, for the
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first
