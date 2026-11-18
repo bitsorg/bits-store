@@ -30,7 +30,7 @@ const (
 	readLately    = 30 * 24 * time.Hour
 )
 
-// adminViews are the admin API's GETs; its actions (PUT) are withdraw and lift.
+// adminViews are the admin API's GETs; its actions (PUT) are withdraw, lift and delete.
 var adminViews = map[string]bool{adminPrefix + "summary": true, adminPrefix + "objects": true,
 	adminPrefix + "object": true, adminPrefix + "access": true, adminPrefix + "withdrawn": true}
 
@@ -78,7 +78,8 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 	case !t.Allows(r.Method, segs):
 		return fail(w, http.StatusForbidden), t, p
 	}
-	if acts := p == adminPrefix+"withdraw" || p == adminPrefix+"lift"; acts != write && (acts || adminViews[p]) {
+	acts := p == adminPrefix+"withdraw" || p == adminPrefix+"lift" || p == adminPrefix+"delete"
+	if acts != write && (acts || adminViews[p]) {
 		if acts {
 			w.Header().Set("Allow", "PUT")
 		} else {
@@ -91,6 +92,8 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 		return s.adminWithdraw(w, r, t), t, p
 	case adminPrefix + "lift":
 		return s.adminLift(w, r, t), t, p
+	case adminPrefix + "delete":
+		return s.adminDelete(w, r, t), t, p
 	case adminPrefix + "withdrawn":
 		if s.withdrawn == nil {
 			return fail(w, http.StatusNotFound), t, p
@@ -746,4 +749,111 @@ func writeJSON(w http.ResponseWriter, v any) int {
 	w.Header().Set("Cache-Control", "no-store")
 	json.NewEncoder(w).Encode(v)
 	return http.StatusOK
+}
+
+// adminDelete deletes one package file of a tarballs binding (PUT {"binding", "key",
+// "etag", "why"}) as seen (the index's ETag), alike in the bucket, and only one a
+// collection could sweep: outside a gate, never one its manifests keep (keptRoots).
+func (s *Server) adminDelete(w http.ResponseWriter, r *http.Request, t *token.Token) int {
+	var req struct {
+		Binding string `json:"binding"`
+		Key     string `json:"key"`
+		ETag    string `json:"etag"`
+		Why     string `json:"why"`
+	}
+	if !readJSON(w, r, &req) {
+		return failMsg(w, http.StatusBadRequest, "body")
+	}
+	b, why := s.binding(req.Binding), strings.TrimSpace(req.Why)
+	switch {
+	case s.index == nil:
+		return fail(w, http.StatusNotFound)
+	case b == nil:
+		return failMsg(w, http.StatusNotFound, "no such binding")
+	case b.Format != "tarballs":
+		return failMsg(w, http.StatusBadRequest, "binding: a tarballs one")
+	case !under(b, req.Key) || len(req.Key) > 1024:
+		return failMsg(w, http.StatusBadRequest, "key")
+	case req.ETag == "":
+		return failMsg(w, http.StatusBadRequest, "etag")
+	case why == "" || len(why) > 500:
+		return failMsg(w, http.StatusBadRequest, "why")
+	}
+	ctx, bucket := r.Context(), s.place[b.Volume]
+	volume := s.keyed(bucket)
+	if volume == "" {
+		return failMsg(w, http.StatusConflict, "no volume with keys for its bucket")
+	}
+	o, ok, err := s.index.Get(ctx, bucket, req.Key)
+	if err == nil && !ok {
+		return fail(w, http.StatusNotFound)
+	}
+	row := objectRow(b, o, "")
+	switch {
+	case err != nil:
+		log.Printf("admin delete: %v", err)
+		return fail(w, http.StatusInternalServerError)
+	case row.Hash == "" || !strings.HasPrefix(row.Hash, path.Base(path.Dir(path.Dir(req.Key)))) ||
+		b.Gate != "" && !groupName.MatchString(row.Group):
+		return failMsg(w, http.StatusBadRequest, "key: a package file") // as a collection has them
+	case o.ETag != req.ETag:
+		return failMsg(w, http.StatusConflict, "changed since seen")
+	}
+	if b.Gate == "" { // a gated binding's builds no manifest lists
+		var mans []string
+		for _, m := range s.bindings {
+			if m.Format == "manifests" && s.place[m.Volume] == bucket && !s.stores[m.Volume].Anonymous() {
+				mans = append(mans, strings.TrimSuffix(m.KeyPrefix, "/"))
+			}
+		}
+		roots, _, why, err := s.keptRoots(ctx, bucket, volume, mans)
+		switch {
+		case err != nil:
+			log.Printf("admin delete: %v", err)
+			return fail(w, http.StatusInternalServerError)
+		case why != "":
+			return failMsg(w, http.StatusConflict, "its bucket is not to be collected now: "+why)
+		case roots[strings.ToLower(row.Hash)]:
+			return failMsg(w, http.StatusConflict, "a manifest lists it")
+		}
+	}
+	dir := path.Dir(req.Key) + "/" // its folder, as an upload leases it
+	if !s.uploads.lease(bucket, dir, s.now()) {
+		return failMsg(w, http.StatusConflict, "busy")
+	}
+	defer s.uploads.release(bucket, dir)
+	st := s.stores[volume]
+	sctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	fi, found, err := st.Stat(sctx, req.Key)
+	switch {
+	case err != nil:
+		log.Printf("admin delete: stat %q: %v", req.Key, err)
+		return fail(w, http.StatusBadGateway)
+	case !found:
+		return failMsg(w, http.StatusNotFound, "not in the bucket")
+	case fi.Size != o.Size || fi.ETag != o.ETag:
+		return failMsg(w, http.StatusConflict, "changed in the bucket")
+	}
+	if err := st.Remove(sctx, req.Key); err != nil {
+		log.Printf("admin delete: %q: %v", req.Key, err)
+		return fail(w, http.StatusBadGateway)
+	}
+	s.found.forget(bucket, req.Key)
+	if err := s.index.Forget(ctx, bucket, req.Key, o.ETag); err != nil {
+		log.Printf("admin delete: the index keeps %q until the next listing: %v", req.Key, err)
+	}
+	log.Printf("admin: %q deleted %q of %s (%d bytes, %s): %q", t.Sub, req.Key, bucket, o.Size, o.ETag, why)
+	return writeJSON(w, map[string]any{"deleted": req.Key, "size": o.Size})
+}
+
+// keyed is the volume with keys for the bucket at (the first by name, as a
+// collection takes it); "": none.
+func (s *Server) keyed(at string) string {
+	for _, n := range slices.Sorted(maps.Keys(s.stores)) {
+		if s.place[n] == at && !s.stores[n].Anonymous() {
+			return n
+		}
+	}
+	return ""
 }

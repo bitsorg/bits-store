@@ -160,6 +160,12 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   (`by`, the token's `sub`), when and why. They are kept in `withdrawn.json` beside
   the index (`-data`), not in it: an index dropped and listed again gives none back; a
   file that cannot be read stops the start.
+  `PUT /_admin/delete` `{"binding", "key", "etag", "why"}` deletes one package file of
+  a `tarballs` binding as seen (`etag`, the index's), when the bucket has it alike (size
+  and ETag) and no upload to its folder is under way; outside a gate, only when a
+  collection could plan its bucket now and no manifest keeps its hash (as `-gc` has
+  them: `409` otherwise, with why). The index forgets it at once; the answer is
+  `{"deleted", "size"}`.
 - `/metrics` (with the index; Prometheus text, no token: block it in front, for the
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first

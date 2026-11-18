@@ -201,6 +201,12 @@ func (x *Index) Put(ctx context.Context, bucket string, o Object, now time.Time)
 	return err
 }
 
+// Forget drops the bucket's row of a key the service deleted, as it was (its ETag).
+func (x *Index) Forget(ctx context.Context, bucket, key, etag string) error {
+	_, err := x.db.ExecContext(ctx, `DELETE FROM objects WHERE bucket = ? AND key = ? AND etag = ?`, bucket, key, etag)
+	return err
+}
+
 // Get returns the bucket's row of a key; ok is false when there is none.
 func (x *Index) Get(ctx context.Context, bucket, key string) (o Object, ok bool, err error) {
 	var mtime int64

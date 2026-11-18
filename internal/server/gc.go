@@ -101,22 +101,10 @@ func (s *Server) PlanGC(ctx context.Context, o GCOptions) ([]*GCPlan, error) {
 	for _, bucket := range slices.Sorted(maps.Keys(tars)) {
 		p := &GCPlan{Volume: name[bucket], bucket: bucket, mans: mans[bucket]}
 		plans = append(plans, p)
-		why, err := s.gcRefused(ctx, bucket, p.Volume, mans[bucket])
-		if err != nil {
+		roots, certified, why, err := s.keptRoots(ctx, bucket, p.Volume, mans[bucket])
+		if p.Refused = why; err != nil {
 			return nil, err
-		}
-		p.Refused = why
-		if why != "" {
-			continue
-		}
-		roots, certified, err := s.index.Roots(ctx, bucket, s.manifestKeys.IDs())
-		if err != nil {
-			return nil, err
-		}
-		if p.Refused, err = s.strayRoots(ctx, bucket, p.Volume, roots); err != nil || p.Refused != "" {
-			if err != nil {
-				return nil, err
-			}
+		} else if why != "" {
 			continue
 		}
 		if err := s.planTree(ctx, p, tars[bucket], false, roots, certified, o); err != nil {
@@ -232,6 +220,20 @@ func (s *Server) planTree(ctx context.Context, p *GCPlan, prefixes []string, gro
 			since.UTC().Format(time.DateOnly), since.Add(o.Read).UTC().Format(time.DateOnly))
 	}
 	return nil
+}
+
+// keptRoots are the hashes an ungated bucket's manifests keep, and its certified
+// architectures, as a collection has them; why says what refuses the bucket instead.
+func (s *Server) keptRoots(ctx context.Context, bucket, volume string, mans []string) (
+	roots, certified map[string]bool, why string, err error) {
+	if why, err = s.gcRefused(ctx, bucket, volume, mans); why != "" || err != nil {
+		return nil, nil, why, err
+	}
+	if roots, certified, err = s.index.Roots(ctx, bucket, s.manifestKeys.IDs()); err != nil {
+		return nil, nil, "", err
+	}
+	why, err = s.strayRoots(ctx, bucket, volume, roots)
+	return roots, certified, why, err
 }
 
 // listedLately says why a bucket's index may not stand for it ("" when it may):

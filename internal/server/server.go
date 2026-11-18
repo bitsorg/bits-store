@@ -385,6 +385,17 @@ func (c *foundCache) lookup(ctx context.Context, s *Server, b *Binding, dir stri
 	return key, nil
 }
 
+// forget drops the hits on key of the bucket at: deleted here, not to be read again.
+func (c *foundCache) forget(at, key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, e := range c.hits {
+		if e.key == key && strings.HasPrefix(k, at+"\x00") {
+			delete(c.hits, k)
+		}
+	}
+}
+
 // stored records an object this instance stored in a folder.
 func (c *foundCache) stored(s *Server, volume, dir, key string, now time.Time) {
 	c.set(s.place[volume]+"\x00"+dir, key, now)

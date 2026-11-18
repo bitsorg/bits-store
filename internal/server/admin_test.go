@@ -568,3 +568,77 @@ func TestWithdrawalsFile(t *testing.T) {
 		t.Fatalf("no file yet: %v", err)
 	}
 }
+
+// An admin deletes one package file as seen (its ETag), not while a manifest lists it
+// or one is not read yet, nor once changed in the bucket; the index forgets it.
+func TestAdminDeletes(t *testing.T) {
+	s, m, x, _ := gcSetup(t)
+	ctx := context.Background()
+	admin := adminToken(t, s, "admin:alice", time.Minute, "PUT /_admin/delete")
+	tars := "/store/lhcb/x86_64-el10-gcc14-opt/t"
+	del := func(code int, binding, key, etag, why string) {
+		t.Helper()
+		b, _ := json.Marshal(map[string]string{"binding": binding, "key": key, "etag": etag, "why": why})
+		r := httptest.NewRequest("PUT", "/_admin/delete", strings.NewReader(string(b)))
+		r.Header.Set("Authorization", "Bearer "+admin)
+		w := httptest.NewRecorder()
+		if s.ServeAdmin(w, r); w.Code != code {
+			t.Fatalf("%s: want %d, got %d %s", key, code, w.Code, w.Body)
+		}
+	}
+	etag := func(key string) string {
+		o, _ := indexed(t, s, "s3", key)
+		return o.ETag
+	}
+	listed, other := "TT/el9/store/aa/aa/a-1-1.el9.tar.gz", "TT/el9/store/bb/bb22/b-1-1.el9.tar.gz"
+	del(409, tars, listed, etag(listed), "x") // a manifest lists it
+	del(409, tars, other, "old", "x")
+	del(400, tars, "TT/el9/dist/x", etag("TT/el9/dist/x"), "x")
+	del(400, tars, "TT/el9/store/ee/xx55/e", etag("TT/el9/store/ee/xx55/e"), "x") // its folder not its hash's
+	del(400, "/store/lhcb/x86_64-el10-gcc14-opt/m", "MM/common-manifest-el9.json", etag("MM/common-manifest-el9.json"), "x")
+	del(400, tars, other, etag(other), " ")
+	del(400, tars, "OTHER/el9/store/bb/bb22/b", "e", "x")
+	del(404, tars, "TT/el9/store/zz/zz/z-1-1.el9.tar.gz", "e", "x")
+	del(404, "/nowhere", other, etag(other), "x")
+	m.statFails = other
+	del(502, tars, other, etag(other), "x")
+	m.statFails = ""
+	was := m.objs[other]
+	m.objs[other] = []byte("rewritten")
+	del(409, tars, other, etag(other), "x")
+	m.objs[other] = was
+	// a BOM not read yet may list it
+	bom := "MM/release_y-1/b.el9.json"
+	m.objs[bom] = []byte(`{"build_id": "release_y-1", "packages": [{"hash": "zz", "effective_architecture": "el9"}]}`)
+	x.Put(ctx, s.place["s3"], index.Object{Key: bom, Size: int64(len(m.objs[bom])), ETag: m.etag(bom), Mtime: s.now()}, s.now())
+	del(409, tars, other, etag(other), "x")
+	s.readManifests(ctx)
+	// a BOM without an architecture keeps its hash under any, as a collection has it
+	never := "TT/el10/store/dd/dd44/d-1-1.el10.tar.gz"
+	bom2 := "MM/release_z-1/d.json"
+	m.objs[bom2] = []byte(`{"build_id": "release_z-1", "packages": [{"hash": "DD44"}]}`)
+	x.Put(ctx, s.place["s3"], index.Object{Key: bom2, Size: int64(len(m.objs[bom2])), ETag: m.etag(bom2), Mtime: s.now()}, s.now())
+	s.readManifests(ctx)
+	del(409, tars, never, etag(never), "x")
+	// an index not listed lately does not stand for the bucket
+	now := s.now()
+	s.now = func() time.Time { return now.Add(s.verifyEvery + 3*time.Hour) }
+	admin = adminToken(t, s, "admin:alice", time.Minute, "PUT /_admin/delete")
+	del(409, tars, other, etag(other), "x")
+	s.now = func() time.Time { return now }
+	admin = adminToken(t, s, "admin:alice", time.Minute, "PUT /_admin/delete")
+	at := s.place["s3"]
+	s.uploads.lease(at, "TT/el9/store/bb/bb22/", now)
+	del(409, tars, other, etag(other), "x") // an upload to its folder
+	s.uploads.release(at, "TT/el9/store/bb/bb22/")
+	if !m.has(other) || !m.has(listed) || !m.has(never) {
+		t.Fatal("deleted while refused")
+	}
+	s.found.set(at+"\x00TT/el9/store/bb/bb22", other, s.now())
+	s.found.set(at+"\x00TT/el9/store/aa/aa", listed, s.now())
+	del(200, tars, other, etag(other), "a bad build")
+	if _, ok := indexed(t, s, "s3", other); ok || m.has(other) || len(s.found.hits) != 1 {
+		t.Fatalf("not deleted, or still known: %v %v", m.has(other), s.found.hits)
+	}
+	del(404, tars, other, "e", "x")
+}
