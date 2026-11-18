@@ -137,32 +137,24 @@ type Tally struct {
 	Bytes   int64  `json:"bytes"`
 }
 
-// summaryCache is the last summary: one computation at a time, kept a minute.
-type summaryCache struct {
-	mu   sync.Mutex
-	at   time.Time
-	body []byte
-}
-
 func (s *Server) adminSummary(w http.ResponseWriter, r *http.Request) int {
 	if s.index == nil {
 		return fail(w, http.StatusNotFound)
 	}
-	c := &s.summary
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if now := s.now(); c.body == nil || now.Sub(c.at) >= metricsEvery || now.Before(c.at) {
-		sum, err := s.summarize(r.Context(), now)
+	body, err := s.summary.get(r.Context(), s.now(), metricsEvery, s.now, func(ctx context.Context) ([]byte, error) {
+		sum, err := s.summarize(ctx, s.now())
 		if err != nil {
 			log.Printf("admin summary: %v", err)
-			return fail(w, http.StatusInternalServerError)
+			return nil, err
 		}
-		b, _ := json.Marshal(sum)
-		c.at, c.body = now, b
+		return json.Marshal(sum)
+	})
+	if err != nil {
+		return fail(w, http.StatusInternalServerError)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
-	w.Write(c.body)
+	w.Write(body)
 	return http.StatusOK
 }
 

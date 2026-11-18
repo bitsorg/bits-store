@@ -123,7 +123,8 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   for each bucket (named by its first volume) when it was last listed, its drift and
   totals, and each binding's objects and bytes, those read in the last 30 days, a
   `tarballs` binding's by architecture (a gated one's by group/architecture) and
-  those a certified build lists (as `/metrics`); recomputed at most once a minute.
+  those a certified build lists (as `/metrics`); computed as `/metrics` is, at most
+  every 15 minutes.
   `GET /_admin/objects?binding=<prefix>` searches that binding's objects in the index,
   in key order: `under` a folder (an architecture, `<group>/<arch>`, `rev-index`),
   `q` text in the key (any case), `kind` (`bom`, `common`, or `none`: read and not a
@@ -159,7 +160,12 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   a gate); what its last listing found (`bits_store_index_drift`, `kind` missing,
   changed or extra) and when
   it began (`bits_store_index_verified_seconds`); `bits_store_index_errors_total`,
-  the writes the index failed to record. Scrapes within a minute share one answer.
+  the writes the index failed to record. It is computed at most every 15 minutes (a
+  scan of the index; scrapes in between share its answer), in the background, not
+  bound to the scrape that asked (a large index can take longer than a scraper waits):
+  a scrape waits up to 5 seconds for a newer answer, else gets the last (at most 30
+  minutes old); one with none waits as long as it may; one that waited for a failed
+  computation gets `500`.
 - Reads: each `GET` the service redirects counts for its object in the index (how many
   and the last), written once a minute; reads straight from the bucket (public plain
   URLs, `b3://`) are not seen, nor those of more than 100,000 objects in a minute (logged),

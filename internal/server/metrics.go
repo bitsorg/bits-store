@@ -12,20 +12,14 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bitsorg/bits-store/internal/index"
 )
 
-const metricsEvery = time.Minute // scrapes within it share one answer
-
-// metricsCache is the last answer: one computation at a time, however many scrape.
-type metricsCache struct {
-	mu   sync.Mutex
-	at   time.Time
-	body string
-}
+// metricsEvery is how often /metrics (and the admin summary) is computed again: the
+// store's totals change slowly, and on a large index one computation is a heavy scan.
+const metricsEvery = 15 * time.Minute
 
 // label quotes a label value as the text format has it: \\, \" and \n only.
 var label = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
@@ -50,14 +44,11 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) int {
 	if s.index == nil {
 		return fail(w, http.StatusNotFound)
 	}
-	c := &s.scrape
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if now := s.now(); c.body == "" || now.Sub(c.at) >= metricsEvery || now.Before(c.at) {
-		m, err := s.collect(r.Context())
+	body, err := s.scrape.get(r.Context(), s.now(), metricsEvery, s.now, func(ctx context.Context) (string, error) {
+		m, err := s.collect(ctx)
 		if err != nil {
 			log.Printf("metrics: %v", err)
-			return fail(w, http.StatusInternalServerError)
+			return "", err
 		}
 		var b strings.Builder
 		for _, d := range metricsDoc {
@@ -66,10 +57,13 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) int {
 				b.WriteString(d[0] + l + "\n")
 			}
 		}
-		c.at, c.body = now, b.String()
+		return b.String(), nil
+	})
+	if err != nil {
+		return fail(w, http.StatusInternalServerError) // logged when computed; a scraper that gave up: never seen
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprint(w, c.body)
+	fmt.Fprint(w, body)
 	return http.StatusOK
 }
 

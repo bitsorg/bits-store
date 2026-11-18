@@ -49,12 +49,12 @@ type Server struct {
 	plain       map[string]objectStore // volume -> plain URLs, for public bindings
 	accessLog   string
 	health      *volumeHealth
-	scrape      metricsCache
-	summary     summaryCache  // the admin API's
-	keptBy      keptCache     // the admin API's: the collection's verdicts
-	access      Access        // the admin API's: the configuration in force, without secrets
-	index       *index.Index  // nil: none (no -data)
-	verifyEvery time.Duration // how often a bucket is listed against the index
+	scrape      refreshed[string] // /metrics' answer
+	summary     refreshed[[]byte] // the admin API's
+	keptBy      keptCache         // the admin API's: the collection's verdicts
+	access      Access            // the admin API's: the configuration in force, without secrets
+	index       *index.Index      // nil: none (no -data)
+	verifyEvery time.Duration     // how often a bucket is listed against the index
 
 	manifestKeys index.Keys   // the common manifests' signing keys
 	reads        *readTable   // GETs redirected, for the index
