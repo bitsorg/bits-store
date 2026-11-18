@@ -56,6 +56,9 @@ func TestReloadTakesAGoodConfigAndKeepsTheRunningOneOverABadOne(t *testing.T) {
 	if err := r.UseWithdrawals(filepath.Join(t.TempDir(), "withdrawn.json")); err != nil || s.withdrawn == nil {
 		t.Fatalf("withdrawals: %v", err)
 	}
+	if err := r.UseGC(filepath.Join(t.TempDir(), "gc")); err != nil || s.gc == nil {
+		t.Fatalf("collections: %v", err)
+	}
 	get := func() int {
 		w := do(r.cur.Load(), "GET", "/store/lhcb/x86_64-el10-gcc14-opt/ab/h",
 			map[string]string{"Authorization": "Bearer " + good})
@@ -71,8 +74,8 @@ func TestReloadTakesAGoodConfigAndKeepsTheRunningOneOverABadOne(t *testing.T) {
 	if ok, err := r.Check(); !ok || err != nil || get() != 302 {
 		t.Fatalf("new binding: reloaded %v, %v; GET %d, want 302", ok, err, get())
 	}
-	if c := r.cur.Load(); c.uploads != s.uploads || c.fetches != s.fetches || c.index != s.index || c.withdrawn != s.withdrawn {
-		t.Fatal("pending uploads, fetches, the index or the withdrawals did not carry over")
+	if c := r.cur.Load(); c.uploads != s.uploads || c.fetches != s.fetches || c.index != s.index || c.withdrawn != s.withdrawn || c.gc != s.gc {
+		t.Fatal("pending uploads, fetches, the index, withdrawals or collections did not carry over")
 	}
 	if s.fetches.m["failed"] != nil || s.fetches.m["running"] != running {
 		t.Fatal("remembered failures kept, or a running fetch dropped")

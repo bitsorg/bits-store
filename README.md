@@ -166,6 +166,15 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   collection could plan its bucket now and no manifest keeps its hash (as `-gc` has
   them: `409` otherwise, with why). The index forgets it at once; the answer is
   `{"deleted", "size"}`.
+  `PUT /_admin/gc/plan` `{"grace", "read", "reads", "keep_builds", "max"}` (Go
+  durations; `-gc`'s defaults for those left out, all with `{}`) plans a collection in the background
+  as `-gc` does: `202 {"id"}`, `409` while another job runs (one at a time). Each plan
+  is kept in `gc/` beside the index (the newest 20): `<id>.json` as `-gc-out` writes it
+  (`-gc-apply` takes it) and `<id>.summary.json`, by bucket what goes or why it is
+  refused; one without its summary is not done.
+  `GET /_admin/gc`: the job running (or the last: who, when, its error) and the last 10
+  plans; `GET /_admin/gc/files?id=<id>`: a plan's files to go (`offset`, `limit` 100,
+  at most 500; `total`).
 - `/metrics` (with the index; Prometheus text, no token: block it in front, for the
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first

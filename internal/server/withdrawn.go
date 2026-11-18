@@ -116,35 +116,43 @@ func (w *withdrawals) save(list []Withdrawal) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(w.path), ".withdrawn-*")
+	if err := writeFile(w.path, append(b, '\n'), 0o600); err != nil {
+		return err
+	}
+	w.list = list // as the file now is
+	return nil
+}
+
+// writeFile writes b to name whole, with perm: a new file synced and renamed over
+// the old, then its folder synced (a failure there only logged: the file is in place).
+func writeFile(name string, b []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(name), ".tmp-"+filepath.Base(name)+"-*")
 	if err != nil {
 		return err
 	}
 	defer os.Remove(f.Name()) // gone once renamed
-	if _, err = f.Write(append(b, '\n')); err == nil {
+	if _, err = f.Write(b); err == nil {
+		err = f.Chmod(perm)
+	}
+	if err == nil {
 		err = f.Sync()
 	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
 	if err == nil {
-		err = os.Rename(f.Name(), w.path)
+		err = os.Rename(f.Name(), name)
 	}
 	if err != nil {
 		return err
 	}
-	w.list = list // as the file now is
-	if err := syncDir(filepath.Dir(w.path)); err != nil {
-		log.Printf("%s: the rename may not outlive a power loss: %v", w.path, err)
+	d, err := os.Open(filepath.Dir(name))
+	if err == nil {
+		err = d.Sync()
+		d.Close()
+	}
+	if err != nil {
+		log.Printf("%s: the rename may not outlive a power loss: %v", name, err)
 	}
 	return nil
-}
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
 }

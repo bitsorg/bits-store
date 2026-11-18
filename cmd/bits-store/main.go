@@ -81,6 +81,9 @@ func main() {
 		if err := h.UseWithdrawals(filepath.Join(*data, "withdrawn.json")); err != nil {
 			log.Fatal(err) // never serve builds withdrawn, unread
 		}
+		if err := h.UseGC(filepath.Join(*data, "gc")); err != nil {
+			log.Fatal(err)
+		}
 		go h.Verify()
 		go h.FlushReads()
 	}

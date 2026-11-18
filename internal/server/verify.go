@@ -30,6 +30,15 @@ func (r *Reloader) UseWithdrawals(path string) error {
 	return err
 }
 
+// UseGC keeps the admin API's collection plans in dir (-data's), made if need be.
+func (r *Reloader) UseGC(dir string) error {
+	g, err := openGCJobs(dir)
+	if err == nil {
+		r.cur.Load().gc = g
+	}
+	return err
+}
+
 // Verify lists each keyed bucket against the index, one at a time: when it was
 // never verified, then every index_verify; then reads the manifests. It never returns.
 func (r *Reloader) Verify() {

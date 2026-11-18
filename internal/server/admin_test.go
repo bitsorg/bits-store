@@ -642,3 +642,121 @@ func TestAdminDeletes(t *testing.T) {
 	}
 	del(404, tars, other, "e", "x")
 }
+
+// An admin plans a collection in the service: in the background, one job at a time,
+// kept as -gc-out writes it (so -gc-apply takes it) with a summary; its files paged.
+func TestAdminGCPlan(t *testing.T) {
+	s, _, _, _ := gcSetup(t)
+	var err error
+	if s.gc, err = openGCJobs(filepath.Join(t.TempDir(), "gc")); err != nil {
+		t.Fatal(err)
+	}
+	admin := adminToken(t, s, "admin:alice", time.Minute, "PUT /_admin/gc/plan", "GET /_admin/**")
+	auth := map[string]string{"Authorization": "Bearer " + admin}
+	put := func(body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("PUT", "/_admin/gc/plan", strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer "+admin)
+		w := httptest.NewRecorder()
+		s.ServeAdmin(w, r)
+		return w
+	}
+	for _, bad := range []string{`{"max": 2}`, `{"grace": "a month"}`, `{"read": "0s", "reads": 3}`, `{"keep_builds": -1}`, `{"days": 1}`} {
+		if w := put(bad); w.Code != 400 {
+			t.Errorf("%s: %d %s", bad, w.Code, w.Body)
+		}
+	}
+	if s.gc.current() != nil {
+		t.Fatal("a refused plan started a job")
+	}
+	s.gc.job = &GCJob{Kind: "plan"} // running
+	if w := put(`{}`); w.Code != 409 {
+		t.Fatalf("a second job: %d", w.Code)
+	}
+	s.gc.job = nil
+	w := put(`{"grace": "168h", "keep_builds": 0}`)
+	var started struct{ ID string }
+	if json.Unmarshal(w.Body.Bytes(), &started); w.Code != 202 || !gcID.MatchString(started.ID) {
+		t.Fatalf("plan: %d %s", w.Code, w.Body)
+	}
+	for i := 0; s.gc.current().Ended == nil; i++ {
+		if i > 500 {
+			t.Fatal("the plan never ended")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	var got struct {
+		Job   GCJob
+		Plans []GCSummary
+	}
+	w = doAdmin(s, "GET", "/_admin/gc", auth)
+	if json.Unmarshal(w.Body.Bytes(), &got); w.Code != 200 || got.Job.Error != "" || got.Job.By != "admin:alice" ||
+		len(got.Plans) != 1 || got.Plans[0].ID != started.ID || got.Plans[0].Options.Grace != "168h0m0s" {
+		t.Fatalf("the job and plans: %d %s", w.Code, w.Body)
+	}
+	sum := got.Plans[0]
+	want := 0
+	for _, p := range sum.Buckets {
+		for _, a := range p.Arches {
+			if p.Refused == "" {
+				want += a.Sweep
+			}
+		}
+	}
+	if sum.Files != want || want == 0 {
+		t.Fatalf("files to go: %d, its buckets %d: %s", sum.Files, want, w.Body)
+	}
+	// -gc-apply takes it, with the same options
+	o := DefaultGC
+	o.Grace, o.KeepBuilds = 168*time.Hour, 0
+	if f, err := readGCFile(filepath.Join(s.gc.dir, started.ID+".json"), o, s.now()); err != nil || len(f.Files) != want {
+		t.Fatalf("not a -gc-out file: %v", err)
+	}
+	var page struct {
+		Total int
+		Files []gcFileEntry
+	}
+	w = doAdmin(s, "GET", "/_admin/gc/files?id="+started.ID+"&offset=1&limit=1", auth)
+	if json.Unmarshal(w.Body.Bytes(), &page); w.Code != 200 || page.Total != want || len(page.Files) != min(1, want-1) {
+		t.Fatalf("a page: %d %s", w.Code, w.Body)
+	}
+	for target, code := range map[string]int{"/_admin/gc/files?id=../../index": 400, "/_admin/gc/files?id=" + started.ID + "&limit=501": 400,
+		"/_admin/gc/files?id=20000101T000000Z-000000": 404} {
+		if w := doAdmin(s, "GET", target, auth); w.Code != code {
+			t.Errorf("%s: want %d, got %d", target, code, w.Code)
+		}
+	}
+	// a refused bucket's files are not counted to go
+	refused := []*GCPlan{{Volume: "a", Refused: "no", Arches: []*GCArch{{Sweep: 2, SweepBytes: 10}}},
+		{Volume: "b", Arches: []*GCArch{{Sweep: 1, SweepBytes: 5}}}}
+	if err := s.gc.save("29990101T000000Z-000000", "x", refused, o, s.now()); err != nil {
+		t.Fatal(err)
+	}
+	if last, err := s.gc.plans(1); err != nil || last[0].Files != 1 || last[0].Bytes != 5 {
+		t.Fatalf("a refused bucket counted: %v %+v", err, last)
+	}
+	// a plan without its summary is not done; the newest gcKept plans are kept
+	os.Remove(filepath.Join(s.gc.dir, started.ID+".summary.json"))
+	if w := doAdmin(s, "GET", "/_admin/gc/files?id="+started.ID, auth); w.Code != 404 {
+		t.Fatalf("a plan not done: %d", w.Code)
+	}
+	for i := range gcKept + 2 {
+		if err := s.gc.save(fmt.Sprintf("2999%04dT000000Z-000000", 101+i), "x", refused, o, s.now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.WriteFile(filepath.Join(s.gc.dir, "29991231T000000Z-000000.summary.json"), []byte("{"), 0o644)
+	ids, _ := s.gc.ids()
+	if last, err := s.gc.plans(3); err != nil || len(ids) != gcKept+1 || len(last) != 2 || last[0].ID != "29990122T000000Z-000000" {
+		t.Fatalf("kept: %v; listed: %v %v", ids, err, last)
+	}
+	if _, err := os.Stat(filepath.Join(s.gc.dir, "29990101T000000Z-000000.json")); !os.IsNotExist(err) {
+		t.Fatalf("an old plan kept: %v", err)
+	}
+	reader := adminToken(t, s, "admin:bob", time.Minute, "GET /_admin/**")
+	r := httptest.NewRequest("PUT", "/_admin/gc/plan", strings.NewReader(`{}`))
+	r.Header.Set("Authorization", "Bearer "+reader)
+	rec := httptest.NewRecorder()
+	if s.ServeAdmin(rec, r); rec.Code != 403 {
+		t.Fatalf("a token allowed only GETs planned: %d", rec.Code)
+	}
+}

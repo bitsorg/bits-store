@@ -51,21 +51,28 @@ const (
 
 // GCArch is the plan for one architecture of a bucket's package tree.
 type GCArch struct {
-	Arch                                    string
-	Certified                               bool // a verified common manifest lists packages of it: else nothing goes
-	Kept, Young, Read, Newest, Other, Sweep int  // Other: not packages, never swept; Read: read lately; Newest: of the newest builds of their version
-	KeptBytes, SweepBytes                   int64
-	sweep                                   []index.Object
+	Arch       string `json:"arch"`
+	Certified  bool   `json:"certified"` // a verified common manifest lists packages of it: else nothing goes
+	Kept       int    `json:"kept"`
+	Young      int    `json:"young"`
+	Read       int    `json:"read"`   // read lately
+	Newest     int    `json:"newest"` // of the newest builds of their version
+	Other      int    `json:"other"`  // not packages, never swept
+	Sweep      int    `json:"sweep"`
+	KeptBytes  int64  `json:"kept_bytes"`
+	SweepBytes int64  `json:"sweep_bytes"`
+	sweep      []index.Object
 }
 
 // GCPlan is a bucket's collection, named by its first volume; Refused says why
 // nothing of it may be swept.
 type GCPlan struct {
-	Volume, Refused string
-	Arches          []*GCArch
-	bucket          string
-	mans            []string          // its manifests bindings' key prefixes
-	why             map[string]string // when set, planTree's verdict by key (Why*)
+	Volume  string    `json:"volume"`
+	Refused string    `json:"refused,omitempty"`
+	Arches  []*GCArch `json:"arches"`
+	bucket  string
+	mans    []string          // its manifests bindings' key prefixes
+	why     map[string]string // when set, planTree's verdict by key (Why*)
 }
 
 // A package file, as bits' gc.py has it: <arch>/store/<h2>/<hash>/<file>, h2 the hash's start.
@@ -321,18 +328,10 @@ func GC(path, data string, o GCOptions, out io.Writer) int {
 	case err != nil:
 	case data == "":
 		err = errors.New("-gc needs -data, the service's index")
-	case o.Grace <= 0:
-		err = errors.New("-gc-grace: a positive duration")
-	case !(o.Max > 0 && o.Max <= 1): // NaN too
-		err = errors.New("-gc-max: a share above 0, at most 1")
-	case o.Read < 0 || o.Reads < 0 || o.Read > 10*365*24*time.Hour:
-		err = errors.New("-gc-read, -gc-reads: 0 (no such rule) or more; -gc-read at most ten years")
-	case o.KeepBuilds < 0:
-		err = errors.New("-gc-keep-builds: 0 (no such rule) or more")
-	case o.Read == 0 && o.Reads > 0:
-		err = errors.New("-gc-reads counts within four times -gc-read: with -gc-read 0, set -gc-reads 0")
 	case o.Out != "" && o.Apply != "":
 		err = errors.New("-gc-out writes a plan, -gc-apply deletes what one names: not both")
+	default:
+		err = checkGCOptions(o)
 	}
 	var s *Server
 	if err == nil {
@@ -357,6 +356,23 @@ func GC(path, data string, o GCOptions, out io.Writer) int {
 		return 1
 	}
 	return writePlan(out, plans, o)
+}
+
+// checkGCOptions says what is wrong with o's rules, nil when nothing.
+func checkGCOptions(o GCOptions) error {
+	switch {
+	case o.Grace <= 0:
+		return errors.New("-gc-grace: a positive duration")
+	case !(o.Max > 0 && o.Max <= 1): // NaN too
+		return errors.New("-gc-max: a share above 0, at most 1")
+	case o.Read < 0 || o.Reads < 0 || o.Read > 10*365*24*time.Hour:
+		return errors.New("-gc-read, -gc-reads: 0 (no such rule) or more; -gc-read at most ten years")
+	case o.KeepBuilds < 0:
+		return errors.New("-gc-keep-builds: 0 (no such rule) or more")
+	case o.Read == 0 && o.Reads > 0:
+		return errors.New("-gc-reads counts within four times -gc-read: with -gc-read 0, set -gc-reads 0")
+	}
+	return nil
 }
 
 // gcFile is a plan's files to go, as -gc-out writes it for review and -gc-apply reads it.
@@ -407,23 +423,7 @@ func writeGCFile(name string, plans []*GCPlan, o GCOptions, now time.Time) error
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(name), ".gc-plan-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(append(b, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), name)
+	return writeFile(name, append(b, '\n'), 0o644)
 }
 
 // readGCFile reads a plan file -gc-out wrote, with options o, at most gcPlanLife ago.

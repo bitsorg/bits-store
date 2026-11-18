@@ -30,9 +30,14 @@ const (
 	readLately    = 30 * 24 * time.Hour
 )
 
-// adminViews are the admin API's GETs; its actions (PUT) are withdraw, lift and delete.
-var adminViews = map[string]bool{adminPrefix + "summary": true, adminPrefix + "objects": true,
-	adminPrefix + "object": true, adminPrefix + "access": true, adminPrefix + "withdrawn": true}
+// The admin API's views (GET) and actions (PUT).
+var (
+	adminViews = map[string]bool{adminPrefix + "summary": true, adminPrefix + "objects": true,
+		adminPrefix + "object": true, adminPrefix + "access": true, adminPrefix + "withdrawn": true,
+		adminPrefix + "gc": true, adminPrefix + "gc/files": true}
+	adminActions = map[string]bool{adminPrefix + "withdraw": true, adminPrefix + "lift": true,
+		adminPrefix + "delete": true, adminPrefix + "gc/plan": true}
+)
 
 // ServeAdmin answers the admin API with the current Server.
 func (r *Reloader) ServeAdmin(w http.ResponseWriter, req *http.Request) {
@@ -78,8 +83,7 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 	case !t.Allows(r.Method, segs):
 		return fail(w, http.StatusForbidden), t, p
 	}
-	acts := p == adminPrefix+"withdraw" || p == adminPrefix+"lift" || p == adminPrefix+"delete"
-	if acts != write && (acts || adminViews[p]) {
+	if acts := adminActions[p]; acts != write && (acts || adminViews[p]) {
 		if acts {
 			w.Header().Set("Allow", "PUT")
 		} else {
@@ -94,6 +98,12 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 		return s.adminLift(w, r, t), t, p
 	case adminPrefix + "delete":
 		return s.adminDelete(w, r, t), t, p
+	case adminPrefix + "gc/plan":
+		return s.adminGCPlan(w, r, t), t, p
+	case adminPrefix + "gc":
+		return s.adminGC(w), t, p
+	case adminPrefix + "gc/files":
+		return s.adminGCFiles(w, rawQuery), t, p
 	case adminPrefix + "withdrawn":
 		if s.withdrawn == nil {
 			return fail(w, http.StatusNotFound), t, p

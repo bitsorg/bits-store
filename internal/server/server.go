@@ -60,6 +60,7 @@ type Server struct {
 	reads        *readTable   // GETs redirected, for the index
 	signer       *proxySigner // signs a gated binding's builds; nil: none
 	withdrawn    *withdrawals // builds withdrawn through the admin API; nil: none (no -data)
+	gc           *gcJobs      // the admin API's collections; nil: none (no -data)
 }
 
 // New builds a Server from a checked configuration.
