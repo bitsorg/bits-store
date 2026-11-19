@@ -175,7 +175,7 @@ func keys(m *memStore) []string {
 	return out
 }
 
-// A pypi binding is private and fetches; index is its alone, an https:// URL.
+// A pypi binding fetches, public or not; index is its alone, an https:// URL.
 func TestPyPIConfig(t *testing.T) {
 	vol := VolumeConf{Endpoint: "https://s3.example.org", Bucket: "bits", Region: "us-east-1", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}
 	for name, c := range map[string]struct {
@@ -185,7 +185,7 @@ func TestPyPIConfig(t *testing.T) {
 		"plain":           {Binding{Prefix: "/pypi", Volume: "s3", KeyPrefix: "PYPI", Format: "pypi"}, true},
 		"index":           {Binding{Prefix: "/pypi", Volume: "s3", KeyPrefix: "PYPI", Format: "pypi", Index: "https://mirror.example.org/simple"}, true},
 		"http index":      {Binding{Prefix: "/pypi", Volume: "s3", KeyPrefix: "PYPI", Format: "pypi", Index: "http://mirror.example.org/simple"}, false},
-		"public":          {Binding{Prefix: "/pypi", Volume: "s3", KeyPrefix: "PYPI", Format: "pypi", Public: true}, false},
+		"public":          {Binding{Prefix: "/pypi", Volume: "s3", KeyPrefix: "PYPI", Format: "pypi", Public: true}, true},
 		"index elsewhere": {Binding{Prefix: "/x", Volume: "s3", KeyPrefix: "X", Index: "https://mirror.example.org/simple"}, false},
 	} {
 		bs, err := (&Config{Volumes: map[string]VolumeConf{"s3": vol}, Bindings: []Binding{c.b}}).bindings()
@@ -253,5 +253,58 @@ func TestPyPIWaitsForRoom(t *testing.T) {
 			t.Fatalf("kept %d of %d: %v", kept(), n, keys(m))
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A public pypi binding: pip reads it without a token, and a first read still has
+// the file fetched into the store, then read from it by its plain URL.
+func TestPyPIPublic(t *testing.T) {
+	t.Setenv("TEST_AK", "a")
+	t.Setenv("TEST_SK", "s")
+	kcs := map[string]KeyConfig{"k": {X: strings.Repeat("A", 43), Signer: "user"}}
+	vols := map[string]VolumeConf{
+		"s3":  {Endpoint: "https://s3.example.org", Bucket: "bits", Region: "r", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"},
+		"pub": {Endpoint: "https://s3.example.org", Bucket: "open", Region: "r"}}
+	pub := Binding{Prefix: "/pypi", Volume: "pub", KeyPrefix: "PYPI", Format: "pypi", Public: true}
+	if _, err := New(&Config{Issuer: "i", Audience: "a", Keys: kcs, Volumes: vols, Bindings: []Binding{pub}}); err == nil {
+		t.Fatal("a pypi binding on a volume without keys: it could not fetch")
+	}
+	pub.Volume = "s3"
+	s, err := New(&Config{Issuer: "i", Audience: "a", Keys: kcs, Volumes: vols, Bindings: []Binding{pub}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := newMem()
+	s.stores["s3"] = m
+	anyAddr(t)
+	data := []byte("a wheel")
+	sum := sha256.Sum256(data)
+	sha, whl := hex.EncodeToString(sum[:]), "demo-1.0-py3-none-any.whl"
+	idx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/simple/demo/":
+			fmt.Fprintf(w, `{"files": [{"filename": %q, "url": "/f/%s", "hashes": {"sha256": %q}}]}`, whl, whl, sha)
+		case "/f/" + whl:
+			w.Write(data)
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	t.Cleanup(idx.Close)
+	s.bindings[0].Index = idx.URL + "/simple"
+	pip := map[string]string{"Accept": pypiJSON} // no token
+	if w := do(s, "GET", "/pypi/simple/demo/", pip); w.Code != 200 || !strings.Contains(w.Body.String(), whl) {
+		t.Fatalf("the page: %d %s", w.Code, w.Body)
+	}
+	link, key := "/pypi/files/demo/"+sha+"/"+whl, "PYPI/files/demo/"+sha+"/"+whl
+	if w := do(s, "GET", link, pip); w.Code != 302 || w.Header().Get("Location") != idx.URL+"/f/"+whl {
+		t.Fatalf("first read: %d %v", w.Code, w.Header())
+	}
+	settled(t, s)
+	if !m.has(key) {
+		t.Fatalf("not kept: %v", keys(m))
+	}
+	if w := do(s, "GET", link, pip); w.Code != 302 || w.Header().Get("Location") != "https://s3.example.org/bits/"+key {
+		t.Fatalf("then from the store, by its plain URL: %d %v", w.Code, w.Header())
 	}
 }

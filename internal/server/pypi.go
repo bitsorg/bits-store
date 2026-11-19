@@ -205,7 +205,11 @@ func (s *Server) pypiFetch(b *Binding, key string, f pyFile, t *token.Token, now
 		budget = s.policy
 	}
 	k := s.place[b.Volume] + "\x00" + key
-	job, fresh, err := s.fetches.join(k, t.Sub, domainOf(host), budget, now)
+	sub := "anonymous" // a public binding's read: one subject for all
+	if t != nil {
+		sub = t.Sub
+	}
+	job, fresh, err := s.fetches.join(k, sub, domainOf(host), budget, now)
 	if errors.Is(err, errFull) && s.fetches.waiting.Add(1) > maxRoomWaiting {
 		s.fetches.waiting.Add(-1) // too many waiting already: not kept this time
 	} else if errors.Is(err, errFull) {
@@ -213,13 +217,13 @@ func (s *Server) pypiFetch(b *Binding, key string, f pyFile, t *token.Token, now
 			defer s.fetches.waiting.Add(-1)
 			for end := time.Now().Add(roomWait); errors.Is(err, errFull) && time.Now().Before(end); {
 				time.Sleep(roomPoll)
-				job, fresh, err = s.fetches.join(k, t.Sub, domainOf(host), budget, s.now())
+				job, fresh, err = s.fetches.join(k, sub, domainOf(host), budget, s.now())
 			}
-			s.pypiFetchJob(b, key, f, t.Sub, k, job, fresh, err)
+			s.pypiFetchJob(b, key, f, sub, k, job, fresh, err)
 		}()
 		return
 	}
-	go s.pypiFetchJob(b, key, f, t.Sub, k, job, fresh, err)
+	go s.pypiFetchJob(b, key, f, sub, k, job, fresh, err)
 }
 
 // pypiFetchJob runs a fetch join gave: a fresh one, not one running already.

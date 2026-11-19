@@ -73,9 +73,11 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   (`PUT /_admin/withdraw`); as with `deny`, a URL handed out before stays good until it
   expires (`url_lifetime`).
 - `pypi` mirrors a Python package index (`index`, PEP 691 JSON; `https://pypi.org/simple`
-  when unset) for pip, with the token as Basic auth (`PIP_INDEX_URL=https://bits:<token>@host/pypi/simple`;
-  never `public`). `GET <prefix>/simple/<project>/` (the name as PEP 503 normalises it;
-  `Accept: application/vnd.pypi.simple.v1+json`, else `406`) answers the index's page,
+  when unset) for pip: `public`, read by anyone (`PIP_INDEX_URL=https://host/pypi/simple`),
+  whose first read of a file also has it fetched; else with the token as Basic auth
+  (`https://bits:<token>@host/pypi/simple`). `GET <prefix>/simple/<project>/` (the
+  name as PEP 503 normalises it; `Accept: application/vnd.pypi.simple.v1+json`, else
+  `406`) answers the index's page,
   asked again after 10 minutes and served as last read while the index cannot answer;
   its files with a SHA-256 link to `<prefix>/files/<project>/<sha256>/<file>`. A file
   the store holds is read from it; one it does not is sent to the index's URL (`302`)

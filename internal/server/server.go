@@ -121,10 +121,11 @@ func New(c *Config) (*Server, error) {
 	for _, b := range bs {
 		// public bindings read by plain URLs; one that fetches or looks has keys
 		anon := s.stores[b.Volume].Anonymous()
+		keyed := b.mirror != nil || b.folder != nil || b.revisions != nil || b.Format == "pypi"
 		switch {
-		case (b.mirror != nil || b.folder != nil || b.revisions != nil) && anon:
+		case keyed && anon:
 			return nil, fmt.Errorf("binding %q: format %s fetches or looks objects up, so it needs a volume with keys", b.Prefix, b.Format)
-		case b.mirror == nil && b.folder == nil && b.revisions == nil && b.Public != anon:
+		case !keyed && b.Public != anon:
 			return nil, fmt.Errorf("binding %q: public bindings need an anonymous volume, private ones a volume with keys", b.Prefix)
 		}
 	}

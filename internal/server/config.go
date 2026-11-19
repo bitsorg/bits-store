@@ -215,8 +215,8 @@ func (c *Config) bindings() ([]Binding, error) {
 		case fetches && b.MaxSize == 0:
 			b.MaxSize = defaultMaxSize
 		}
-		if b.Format == "pypi" && b.Public || b.Format != "pypi" && b.Index != "" {
-			return nil, fmt.Errorf("binding %q: a pypi binding is not public (pip sends the token); index is its", b.Prefix)
+		if b.Format != "pypi" && b.Index != "" {
+			return nil, fmt.Errorf("binding %q: index is a pypi binding's", b.Prefix)
 		}
 		if u, err := url.Parse(b.Index); b.Index != "" && (err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "") {
 			return nil, fmt.Errorf("binding %q: index is an https:// URL", b.Prefix)
