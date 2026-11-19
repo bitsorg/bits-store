@@ -28,6 +28,13 @@ const (
 	maxPages     = 5000             // pages kept
 	maxPageBytes = 64 << 20
 	pageTimeout  = 30 * time.Second
+
+	maxRoomWaiting = 1000 // files waiting for room to be fetched
+)
+
+var (
+	roomWait = 10 * time.Minute // a file waits this long for room, then is not kept
+	roomPoll = time.Second
 )
 
 var errNoProject = errors.New("no such project")
@@ -189,7 +196,8 @@ func (s *Server) pypiPage(w http.ResponseWriter, b *Binding, project string, pag
 }
 
 // pypiFetch fetches f into the store at key in the background, once, as a sources
-// fetch is (the budget aside: a full table only waits for the next read).
+// fetch is; with no room it waits for some, as pip reads a project's files in a
+// burst (throttled, beyond the budget: not kept, make its host trusted).
 func (s *Server) pypiFetch(b *Binding, key string, f pyFile, t *token.Token, now time.Time) {
 	host := strings.ToLower(strings.TrimSuffix(urlHost(f.URL), "."))
 	var budget *fetchPolicy
@@ -198,21 +206,37 @@ func (s *Server) pypiFetch(b *Binding, key string, f pyFile, t *token.Token, now
 	}
 	k := s.place[b.Volume] + "\x00" + key
 	job, fresh, err := s.fetches.join(k, t.Sub, domainOf(host), budget, now)
-	if err != nil { // throttled or full: not kept this time (make its host trusted)
+	if errors.Is(err, errFull) && s.fetches.waiting.Add(1) > maxRoomWaiting {
+		s.fetches.waiting.Add(-1) // too many waiting already: not kept this time
+	} else if errors.Is(err, errFull) {
+		go func() {
+			defer s.fetches.waiting.Add(-1)
+			for end := time.Now().Add(roomWait); errors.Is(err, errFull) && time.Now().Before(end); {
+				time.Sleep(roomPoll)
+				job, fresh, err = s.fetches.join(k, t.Sub, domainOf(host), budget, s.now())
+			}
+			s.pypiFetchJob(b, key, f, t.Sub, k, job, fresh, err)
+		}()
+		return
+	}
+	go s.pypiFetchJob(b, key, f, t.Sub, k, job, fresh, err)
+}
+
+// pypiFetchJob runs a fetch join gave: a fresh one, not one running already.
+func (s *Server) pypiFetchJob(b *Binding, key string, f pyFile, sub, k string, job *fetchJob, fresh bool, err error) {
+	if err != nil {
 		log.Printf("fetch %s from %s: %v", key, f.URL, err)
 		return
 	} else if !fresh {
 		return
 	}
-	go func() {
-		n, err := s.fetch(b.Volume, b.MaxSize, key, f.URL, t.Sub, f.SHA256)
-		if err != nil {
-			log.Printf("fetch %s from %s failed after %d bytes: %v", key, f.URL, n, err)
-		} else {
-			log.Printf("fetched %s from %s: %d bytes", key, f.URL, n)
-		}
-		s.fetches.finish(k, job, err, s.now())
-	}()
+	n, err := s.fetch(b.Volume, b.MaxSize, key, f.URL, sub, f.SHA256)
+	if err != nil {
+		log.Printf("fetch %s from %s failed after %d bytes: %v", key, f.URL, n, err)
+	} else {
+		log.Printf("fetched %s from %s: %d bytes", key, f.URL, n)
+	}
+	s.fetches.finish(k, job, err, s.now())
 }
 
 // index is the index a pypi binding mirrors.

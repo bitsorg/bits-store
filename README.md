@@ -81,7 +81,8 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   the store holds is read from it; one it does not is sent to the index's URL (`302`)
   while the store fetches it, once, keeping it only when its SHA-256 is the one listed
   (`max_size`, the fetch budgets as for `sources`: make the files' host, `pythonhosted.org`,
-  `trusted`, else beyond the day's budget a file is not kept, only logged). A kept file
+  `trusted`, else beyond the day's budget a file is not kept, only logged; with too many
+  fetches running, as when pip reads a burst, a file waits up to 10 minutes for room). A kept file
   stays readable at its link when the index drops it (what bits' pins install); the
   page lists only what the index lists. Its files' links are https (or the index's
   scheme); without their `core-metadata` pip downloads each file it considers. Nothing

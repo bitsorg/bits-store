@@ -194,3 +194,64 @@ func TestPyPIConfig(t *testing.T) {
 		}
 	}
 }
+
+// pip reads a project's files in a burst: a file with no room to be fetched waits
+// for some, and is kept as the others are.
+func TestPyPIWaitsForRoom(t *testing.T) {
+	s, _, _ := setup(t)
+	m := newMem()
+	s.stores["s3"] = m
+	anyAddr(t)
+	defer func(w, p time.Duration) { roomWait, roomPoll = w, p }(roomWait, roomPoll)
+	roomWait, roomPoll = 5*time.Second, 10*time.Millisecond
+	n := maxFetchPerSubject + 1
+	gate := make(chan struct{})
+	var files []string
+	for i := range n {
+		data := fmt.Sprintf("wheel %d", i)
+		sum := sha256.Sum256([]byte(data))
+		files = append(files, fmt.Sprintf(`{"filename": "p-%d-py3-none-any.whl", "url": "/f/%d", "hashes": {"sha256": "%x"}}`, i, i, sum))
+	}
+	idx := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/simple/p/" {
+			fmt.Fprintf(w, `{"files": [%s]}`, strings.Join(files, ","))
+			return
+		}
+		<-gate // the first fetches hold their slots until the test lets them go
+		fmt.Fprintf(w, "wheel %s", strings.TrimPrefix(r.URL.Path, "/f/"))
+	}))
+	t.Cleanup(idx.Close)
+	vol := VolumeConf{Endpoint: "https://s3.example.org", Bucket: "bits", Region: "us-east-1", AccessKeyEnv: "TEST_AK", SecretKeyEnv: "TEST_SK"}
+	bs, err := (&Config{Volumes: map[string]VolumeConf{"s3": vol},
+		Bindings: []Binding{{Prefix: "/pypi", Volume: "s3", KeyPrefix: "PYPI", Format: "pypi"}}}).bindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bs[0].Index = idx.URL + "/simple"
+	s.bindings = append(s.bindings, bs[0])
+	pip := map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("bits:"+userToken(t, s, "GET /pypi/**"))), "Accept": pypiJSON}
+	var page struct{ Files []struct{ URL string } }
+	if w := do(s, "GET", "/pypi/simple/p/", pip); json.Unmarshal(w.Body.Bytes(), &page) != nil || len(page.Files) != n {
+		t.Fatalf("the page: %d %s", w.Code, w.Body)
+	}
+	for _, f := range page.Files {
+		if w := do(s, "GET", f.URL, pip); w.Code != 302 {
+			t.Fatalf("%s: %d", f.URL, w.Code)
+		}
+	}
+	close(gate)
+	kept := func() (k int) {
+		for _, f := range page.Files {
+			if m.has("PYPI" + strings.TrimPrefix(f.URL, "/pypi")) {
+				k++
+			}
+		}
+		return k
+	}
+	for i := 0; kept() < n; i++ {
+		if i > 300 {
+			t.Fatalf("kept %d of %d: %v", kept(), n, keys(m))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

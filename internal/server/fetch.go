@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bitsorg/bits-store/internal/format"
@@ -68,6 +69,7 @@ type fetchTable struct {
 	m               map[string]*fetchJob
 	day             string
 	bySub, byDomain map[string]int
+	waiting         atomic.Int32 // pypi files waiting for room
 }
 
 // join returns the key's running or failed fetch, or a new one (fresh true):
