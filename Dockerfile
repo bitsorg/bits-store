@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-# bits-store: the static binary alone, as an unprivileged user; CA roots for https
-# volumes (a site CA: mount it and set SSL_CERT_FILE).
+# bits-store: the static binary, as an unprivileged user, with git for git bindings
+# (git http-backend) and CA roots for https volumes (a site CA: set SSL_CERT_FILE).
 FROM golang:1.24.7-bookworm AS build
 ARG VERSION=dev
 WORKDIR /src
@@ -11,8 +11,8 @@ RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" -o /bits-store ./cmd/bits-store && \
     mkdir -p /data
 
-FROM scratch
-COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+FROM alpine:3.20.3
+RUN apk add --no-cache ca-certificates git
 COPY --from=build /bits-store /bits-store
 # the index's directory (-data), the user's: a new named volume takes its owner
 COPY --from=build --chown=65532:65532 /data /var/lib/bits-store
