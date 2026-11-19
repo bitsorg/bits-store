@@ -12,8 +12,11 @@ them in its tests.
 
 ## Carrying the token
 
-- `Authorization: Bearer <token>`. Only when the request has no `Authorization`
-  header, the cookie `__Host-bits_store_token` (so no sibling host can set it).
+- `Authorization: Bearer <token>`, or for a read `Authorization: Basic` with the token
+  as the password (any user name: for clients such as pip that send only that, given
+  `https://bits:<token>@host/...`). Only when the request has no `Authorization`
+  header, the cookie `__Host-bits_store_token` (so no sibling host can set it). The
+  admin API takes the Bearer header only.
 - `~/.bits/token` holds the token; the client strips trailing whitespace (`\n`, `\r\n`).
 - A request for a non-public object without a token is refused with 401.
 - How bits-store answers an allowed request (redirects, presigned URLs, what makes a

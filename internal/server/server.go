@@ -422,7 +422,15 @@ func bounded(m map[string]foundEntry) map[string]foundEntry {
 func bearer(r *http.Request) string {
 	if h := r.Header.Values("Authorization"); len(h) > 0 {
 		scheme, tok, ok := strings.Cut(h[0], " ")
-		if len(h) != 1 || !ok || !strings.EqualFold(scheme, "Bearer") {
+		if len(h) != 1 || !ok {
+			return ""
+		}
+		if strings.EqualFold(scheme, "Basic") && (r.Method == http.MethodGet || r.Method == http.MethodHead) { // pip: the token as the password
+			_, tok, ok = r.BasicAuth()
+			if !ok {
+				return ""
+			}
+		} else if !strings.EqualFold(scheme, "Bearer") {
 			return ""
 		}
 		return tok

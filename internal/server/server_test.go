@@ -3,6 +3,7 @@
 package server
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http/httptest"
@@ -144,6 +145,11 @@ func TestRequests(t *testing.T) {
 		{"bad-token", "GET", "/sources/archives/x", map[string]string{"Authorization": "Bearer " + good[:len(good)-2] + "AA"}, 401, ""},
 		{"cookie", "GET", "/sources/archives/x", map[string]string{"Cookie": cookieName + "=" + good}, 302, "/bits/SOURCES/cache/x"},
 		{"header-wins-over-cookie", "GET", "/sources/archives/x", map[string]string{"Authorization": "Basic eDp5", "Cookie": cookieName + "=" + good}, 401, ""},
+		{"basic", "GET", "/sources/archives/x", map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("bits:"+good))}, 302, "/bits/SOURCES/cache/x"},
+		{"basic-no-password", "GET", "/sources/archives/x", map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte(good))}, 401, ""},
+		{"basic-not-base64", "GET", "/sources/archives/x", map[string]string{"Authorization": "Basic " + good}, 401, ""},
+		{"other-scheme", "GET", "/sources/archives/x", map[string]string{"Authorization": "Token " + good}, 401, ""},
+		{"basic-reads-only", "POST", "/sources/archives/x?uploads", map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("bits:"+good))}, 401, ""},
 		{"put-not-yet", "PUT", "/sources/archives/x", auth, 405, ""},
 		{"format-key-escapes", "GET", "/store/lhcb/x86_64-el10-esc/x", auth, 404, ""},
 		{"format-key-escapes-no-token", "GET", "/store/lhcb/x86_64-el10-esc/x", nil, 401, ""},
