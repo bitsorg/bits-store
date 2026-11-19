@@ -72,6 +72,20 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   keep what they downloaded. The admin API withdraws builds the same way, at once
   (`PUT /_admin/withdraw`); as with `deny`, a URL handed out before stays good until it
   expires (`url_lifetime`).
+- `pypi` mirrors a Python package index (`index`, PEP 691 JSON; `https://pypi.org/simple`
+  when unset) for pip, with the token as Basic auth (`PIP_INDEX_URL=https://bits:<token>@host/pypi/simple`;
+  never `public`). `GET <prefix>/simple/<project>/` (the name as PEP 503 normalises it;
+  `Accept: application/vnd.pypi.simple.v1+json`, else `406`) answers the index's page,
+  asked again after 10 minutes and served as last read while the index cannot answer;
+  its files with a SHA-256 link to `<prefix>/files/<project>/<sha256>/<file>`. A file
+  the store holds is read from it; one it does not is sent to the index's URL (`302`)
+  while the store fetches it, once, keeping it only when its SHA-256 is the one listed
+  (`max_size`, the fetch budgets as for `sources`: make the files' host, `pythonhosted.org`,
+  `trusted`, else beyond the day's budget a file is not kept, only logged). A kept file
+  stays readable at its link when the index drops it (what bits' pins install); the
+  page lists only what the index lists. Its files' links are https (or the index's
+  scheme); without their `core-metadata` pip downloads each file it considers. Nothing
+  is written to it.
 - `manifests` is bits' `MANIFESTS` area: the path is the key, as `blob` (the signed
   common manifests), and `GET <prefix>/rev-index/<arch>/<pkg>/<version>?revisions`
   answers `{revision: hash}` from that version's revision markers

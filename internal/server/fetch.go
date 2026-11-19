@@ -188,7 +188,7 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 		log.Printf("fetch %s from %s for %s", key, src, who)
 		go func() {
 			start := time.Now()
-			n, err := s.fetch(b.Volume, b.MaxSize, key, src, t.Sub)
+			n, err := s.fetch(b.Volume, b.MaxSize, key, src, t.Sub, "")
 			if err != nil {
 				log.Printf("fetch %s from %s for %s failed after %d bytes, %s: %v", key, src, who, n, time.Since(start).Round(time.Millisecond), err)
 			} else {
@@ -229,7 +229,8 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 
 // fetch streams src into staging, computing its checksums, and promotes it to key:
 // the bytes read. Another object already at key is a success: the first writer won.
-func (s *Server) fetch(volume string, maxSize int64, key, src, sub string) (n int64, err error) {
+// With want (a SHA-256 in hex), other bytes are refused.
+func (s *Server) fetch(volume string, maxSize int64, key, src, sub, want string) (n int64, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 	defer cancel()
 	stall := time.AfterFunc(fetchStall, cancel)
@@ -275,6 +276,10 @@ func (s *Server) fetch(volume string, maxSize int64, key, src, sub string) (n in
 		return body.n, err
 	}
 	sum := hex.EncodeToString(body.sha.Sum(nil))
+	if want != "" && sum != want {
+		remove()
+		return body.n, fetchError("not the SHA-256 the index lists")
+	}
 	u := &upload{volume: volume, key: key, staging: staging, size: body.n, fetched: true,
 		md5Hex: hex.EncodeToString(body.md5.Sum(nil)), sha256: sum,
 		meta: map[string]string{"sha256": "sha256:" + sum, "source-url": src, "fetched-by": url.PathEscape(sub)}}

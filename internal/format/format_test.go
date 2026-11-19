@@ -35,6 +35,18 @@ var conformance = map[string][]routeCase{
 		{[]string{"x86_64-el9", "0123456789abcdef0123456789abcdef01234567", "f.tar.gz"}, ""},
 		{[]string{"0123456789abcdef0123456789abcdef01234567"}, ""},
 	},
+	"pypi": {
+		{[]string{"simple", "scikit-learn"}, "simple/scikit-learn"},
+		{[]string{"simple", "Scikit_Learn"}, ""}, // as PEP 503 normalises it only
+		{[]string{"simple", "a--b"}, ""},
+		{[]string{"files", "numpy", strings.Repeat("ab", 32), "numpy-2.1.0-cp313-cp313-manylinux_2_17_x86_64.whl"},
+			"files/numpy/" + strings.Repeat("ab", 32) + "/numpy-2.1.0-cp313-cp313-manylinux_2_17_x86_64.whl"},
+		{[]string{"files", "numpy", strings.Repeat("ab", 32), "numpy-2.1.0.tar.gz"}, "files/numpy/" + strings.Repeat("ab", 32) + "/numpy-2.1.0.tar.gz"},
+		{[]string{"files", "numpy", strings.Repeat("AB", 32), "numpy-2.1.0.tar.gz"}, ""},
+		{[]string{"files", "numpy", strings.Repeat("ab", 32), "numpy-2.1.0.exe"}, ""},
+		{[]string{"files", "numpy", strings.Repeat("ab", 32)}, ""},
+		{[]string{"simple"}, ""},
+	},
 	"sources": {
 		{[]string{"9e", "9e107d9d372bb6826bd81d3542a419d6", "a.tar.gz"}, "9e/9e107d9d372bb6826bd81d3542a419d6/a.tar.gz"},
 		{[]string{"9f", "9e107d9d372bb6826bd81d3542a419d6", "a.tar.gz"}, ""},

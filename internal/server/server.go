@@ -60,6 +60,7 @@ type Server struct {
 	reads        *readTable   // GETs redirected, for the index
 	signer       *proxySigner // signs a gated binding's builds; nil: none
 	withdrawn    *withdrawals // builds withdrawn through the admin API; nil: none (no -data)
+	pages        *pageCache   // pypi bindings' pages
 	gc           *gcJobs      // the admin API's collections; nil: none (no -data)
 }
 
@@ -108,7 +109,7 @@ func New(c *Config) (*Server, error) {
 	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
 		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{},
 		policy: pol, fetchClient: pol.client(), plain: map[string]objectStore{}, accessLog: accessLog,
-		health: &volumeHealth{}, verifyEvery: every, manifestKeys: mkeys, reads: &readTable{}, signer: signer,
+		health: &volumeHealth{}, pages: &pageCache{}, verifyEvery: every, manifestKeys: mkeys, reads: &readTable{}, signer: signer,
 		access: accessOf(c, bs, mkeys)}
 	for name, vol := range c.Volumes {
 		s.place[name] = normEndpoint(vol.Endpoint) + " " + vol.Bucket
@@ -176,6 +177,13 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		return fail(w, http.StatusMethodNotAllowed), nil, p
 	}
 	segs, err := token.ParsePath(p)
+	if err != nil && strings.HasSuffix(p, "/") && !write { // pip asks a page as <index>/<project>/
+		if s2, err2 := token.ParsePath(strings.TrimSuffix(p, "/")); err2 == nil {
+			if pb, _, _ := s.resolve(s2); pb != nil && pb.Format == "pypi" {
+				segs, err = s2, nil
+			}
+		}
+	}
 	if err != nil {
 		return fail(w, http.StatusBadRequest), nil, p
 	}
@@ -212,6 +220,12 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 	}
 	if key == "" && dir == "" || b.Gate != "" && dir == "" {
 		return fail(w, http.StatusNotFound), t, p // the binding's format found nothing; a gate holds builds
+	}
+	if b.Format == "pypi" {
+		if write {
+			return fail(w, http.StatusMethodNotAllowed), t, p // its files come from the index only
+		}
+		return s.servePyPI(w, r, b, key, t, now), t, p
 	}
 	if write && b.Gate != "" {
 		if !groupName.MatchString(t.Grp) {

@@ -74,8 +74,8 @@ func TestReloadTakesAGoodConfigAndKeepsTheRunningOneOverABadOne(t *testing.T) {
 	if ok, err := r.Check(); !ok || err != nil || get() != 302 {
 		t.Fatalf("new binding: reloaded %v, %v; GET %d, want 302", ok, err, get())
 	}
-	if c := r.cur.Load(); c.uploads != s.uploads || c.fetches != s.fetches || c.index != s.index || c.withdrawn != s.withdrawn || c.gc != s.gc {
-		t.Fatal("pending uploads, fetches, the index, withdrawals or collections did not carry over")
+	if c := r.cur.Load(); c.uploads != s.uploads || c.fetches != s.fetches || c.index != s.index || c.withdrawn != s.withdrawn || c.gc != s.gc || c.pages != s.pages {
+		t.Fatal("pending uploads, fetches, the index, withdrawals, collections or pages did not carry over")
 	}
 	if s.fetches.m["failed"] != nil || s.fetches.m["running"] != running {
 		t.Fatal("remembered failures kept, or a running fetch dropped")

@@ -74,7 +74,8 @@ type Binding struct {
 	KeyPrefix string `json:"key_prefix"` // "SOURCES/cache"; empty: bucket root
 	Format    string `json:"format"`     // empty: "blob", the path is the key
 	Public    bool   `json:"public"`
-	MaxSize   int64  `json:"max_size"` // bytes a fetch may bring (Mirror formats); 0: 32 GiB
+	MaxSize   int64  `json:"max_size"` // bytes a fetch may bring (Mirror formats, pypi); 0: 32 GiB
+	Index     string `json:"index"`    // pypi: the index mirrored (PEP 691); empty: https://pypi.org/simple
 	Gate      string `json:"gate"`     // "group": each group's builds its own, read by it and its readers
 	// With a gate: the groups that also read a group's builds, {"sft": ["lhcb"]}.
 	Readers map[string][]string `json:"readers"`
@@ -205,13 +206,20 @@ func (c *Config) bindings() ([]Binding, error) {
 		b.mirror, _ = b.format.(format.Mirror)
 		b.folder, _ = b.format.(format.Folder)
 		b.revisions, _ = b.format.(format.Revisions)
+		fetches := b.mirror != nil || b.Format == "pypi"
 		switch {
-		case b.mirror == nil && b.MaxSize != 0:
+		case !fetches && b.MaxSize != 0:
 			return nil, fmt.Errorf("binding %q: max_size is for formats that fetch", b.Prefix)
 		case b.MaxSize < 0 || b.MaxSize > maxFetch:
 			return nil, fmt.Errorf("binding %q: max_size up to %d", b.Prefix, int64(maxFetch))
-		case b.mirror != nil && b.MaxSize == 0:
+		case fetches && b.MaxSize == 0:
 			b.MaxSize = defaultMaxSize
+		}
+		if b.Format == "pypi" && b.Public || b.Format != "pypi" && b.Index != "" {
+			return nil, fmt.Errorf("binding %q: a pypi binding is not public (pip sends the token); index is its", b.Prefix)
+		}
+		if u, err := url.Parse(b.Index); b.Index != "" && (err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "") {
+			return nil, fmt.Errorf("binding %q: index is an https:// URL", b.Prefix)
 		}
 		if b.Gate != "" && (b.Gate != "group" || b.Format != "tarballs" || b.Public) {
 			return nil, fmt.Errorf("binding %q: gate is \"group\", for a tarballs binding not public", b.Prefix)
