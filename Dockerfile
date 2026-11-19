@@ -12,7 +12,9 @@ RUN CGO_ENABLED=0 GOTOOLCHAIN=local go build -trimpath \
     mkdir -p /data
 
 FROM alpine:3.20.3
-RUN apk add --no-cache ca-certificates git
+# git-http-backend is in git-daemon; the build stops if it is missing
+RUN apk add --no-cache ca-certificates git git-daemon && \
+    test -x "$(git --exec-path)/git-http-backend"
 COPY --from=build /bits-store /bits-store
 # the index's directory (-data), the user's: a new named volume takes its owner
 COPY --from=build --chown=65532:65532 /data /var/lib/bits-store
