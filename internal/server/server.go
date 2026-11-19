@@ -61,6 +61,7 @@ type Server struct {
 	signer       *proxySigner // signs a gated binding's builds; nil: none
 	withdrawn    *withdrawals // builds withdrawn through the admin API; nil: none (no -data)
 	pages        *pageCache   // pypi bindings' pages
+	git          *gitShared   // git bindings' repositories
 	gc           *gcJobs      // the admin API's collections; nil: none (no -data)
 }
 
@@ -109,7 +110,7 @@ func New(c *Config) (*Server, error) {
 	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
 		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{},
 		policy: pol, fetchClient: pol.client(), plain: map[string]objectStore{}, accessLog: accessLog,
-		health: &volumeHealth{}, pages: &pageCache{}, verifyEvery: every, manifestKeys: mkeys, reads: &readTable{}, signer: signer,
+		health: &volumeHealth{}, pages: &pageCache{}, git: &gitShared{refreshed: map[string]time.Time{}}, verifyEvery: every, manifestKeys: mkeys, reads: &readTable{}, signer: signer,
 		access: accessOf(c, bs, mkeys)}
 	for name, vol := range c.Volumes {
 		s.place[name] = normEndpoint(vol.Endpoint) + " " + vol.Bucket
@@ -121,7 +122,7 @@ func New(c *Config) (*Server, error) {
 	for _, b := range bs {
 		// public bindings read by plain URLs; one that fetches or looks has keys
 		anon := s.stores[b.Volume].Anonymous()
-		keyed := b.mirror != nil || b.folder != nil || b.revisions != nil || b.Format == "pypi"
+		keyed := b.mirror != nil || b.folder != nil || b.revisions != nil || b.Format == "pypi" || b.Format == "git"
 		switch {
 		case keyed && anon:
 			return nil, fmt.Errorf("binding %q: format %s fetches or looks objects up, so it needs a volume with keys", b.Prefix, b.Format)
@@ -190,6 +191,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 	}
 	b, key, dir := s.resolve(segs)
 	now := s.now()
+	if write && b != nil && b.Format == "git" && strings.HasSuffix(p, "/git-upload-pack") {
+		write = false // git's fetch is a POST: a read
+	}
 	// a public fetching binding reads without a token; asking for a fetch takes one
 	fetchAsk := !write && b != nil && b.mirror != nil && rawQuery != "" && bearer(r) != ""
 	if b == nil || !b.Public || write || fetchAsk {
@@ -211,6 +215,8 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		method := r.Method
 		if write {
 			method = http.MethodPut
+		} else if method == http.MethodPost {
+			method = http.MethodGet // git's fetch
 		}
 		if !t.Allows(method, segs) && !(fetchAsk && b.Public) {
 			return fail(w, http.StatusForbidden), t, p
@@ -221,6 +227,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 	}
 	if key == "" && dir == "" || b.Gate != "" && dir == "" {
 		return fail(w, http.StatusNotFound), t, p // the binding's format found nothing; a gate holds builds
+	}
+	if b.Format == "git" {
+		return s.serveGit(w, r, b, key, p, t, now), t, p
 	}
 	if b.Format == "pypi" {
 		if write {

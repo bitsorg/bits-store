@@ -84,6 +84,9 @@ func main() {
 		if err := h.UseGC(filepath.Join(*data, "gc")); err != nil {
 			log.Fatal(err)
 		}
+		if err := h.UseGit(filepath.Join(*data, "git")); err != nil {
+			log.Fatal(err)
+		}
 		go h.Verify()
 		go h.FlushReads()
 	}

@@ -35,6 +35,17 @@ var conformance = map[string][]routeCase{
 		{[]string{"x86_64-el9", "0123456789abcdef0123456789abcdef01234567", "f.tar.gz"}, ""},
 		{[]string{"0123456789abcdef0123456789abcdef01234567"}, ""},
 	},
+	"git": {
+		{[]string{"github.com", "root-project", "root", "info", "refs"}, "github.com/root-project/root"},
+		{[]string{"github.com", "root-project", "root.git", "git-upload-pack"}, "github.com/root-project/root"},
+		{[]string{"gitlab.cern.ch", "a", "b", "c", "info", "refs"}, "gitlab.cern.ch/a/b/c"},
+		{[]string{"127.0.0.1:8443", "up", "info", "refs"}, "127.0.0.1:8443/up"},
+		{[]string{"GitHub.com", "a", "info", "refs"}, ""},
+		{[]string{"github.com", "info", "refs"}, ""},
+		{[]string{"github.com", "a", "git-receive-pack"}, ""},
+		{[]string{"github.com", "a", "objects", "info", "packs"}, ""},
+		{[]string{"github.com", ".git", "git-upload-pack"}, ""},
+	},
 	"pypi": {
 		{[]string{"simple", "scikit-learn"}, "simple/scikit-learn"},
 		{[]string{"simple", "Scikit_Learn"}, ""}, // as PEP 503 normalises it only

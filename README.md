@@ -89,6 +89,22 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   page lists only what the index lists. Its files' links are https (or the index's
   scheme); without their `core-metadata` pip downloads each file it considers. Nothing
   is written to it.
+- `git` mirrors git repositories for git's smart HTTP, protocol v2:
+  `<prefix>/<host>/<path>` is `https://<host>/<path>` (`.git` or not), read with
+  `git clone --filter=tree:0` (or `blob:none`) and `git fetch`; bits points sources
+  there with `insteadOf`. Each repository is a partial mirror under `-data`'s
+  `git/<key_prefix>/`, served by `git http-backend` (git in the image). Before git
+  answers, the store fetches what the request needs from upstream: on `ls-refs`, a
+  tag the client names that it lacks, at once, and every ref after a minute (commits
+  and trees, no files); on `fetch`, the files of the commits wanted, then kept under
+  `refs/bits/<commit>`, so a branch moved or deleted upstream never loses them. A tag
+  held never moves (a moved one is logged, once); upstream down, what is held is
+  served. One fetch per repository at a time, another request waiting for it (up to
+  15 minutes); git's own fetches reach only what the fetch policy allows, and a new
+  repository of an untrusted host counts against the day's budgets. A client
+  without protocol v2 is sent upstream (`302`); a full clone (no `--filter`) is not
+  served; pushes are refused; a repository upstream does not have is not made. Needs `-data`; the volume, with keys, is for the
+  repositories' bundles (later).
 - `manifests` is bits' `MANIFESTS` area: the path is the key, as `blob` (the signed
   common manifests), and `GET <prefix>/rev-index/<arch>/<pkg>/<version>?revisions`
   answers `{revision: hash}` from that version's revision markers

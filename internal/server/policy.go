@@ -95,34 +95,9 @@ func domainOf(host string) string {
 // client resolves each host itself and connects only to the addresses it allows,
 // redirects included; no proxy, no Accept-Encoding (the bytes stored are those served).
 func (p *fetchPolicy) client() *http.Client {
-	d := &net.Dialer{Timeout: 10 * time.Second} // per address, tried in turn
-	dial := func(ctx context.Context, network, addr string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(addr)
-		if err != nil {
-			return nil, err
-		}
-		host = strings.ToLower(strings.TrimSuffix(host, "."))
-		ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
-		if err != nil {
-			return nil, err
-		}
-		err = errNotAllowed // also when the name has no address
-		for _, a := range ips {
-			if a = a.Unmap(); !fetchAllowed(p, host, a) {
-				err = fmt.Errorf("%w (%s is %s)", errNotAllowed, host, a) // logged, not answered
-				continue
-			}
-			c, derr := d.DialContext(ctx, network, net.JoinHostPort(a.String(), port))
-			if derr == nil {
-				return c, nil
-			}
-			err = derr
-		}
-		return nil, err
-	}
 	return &http.Client{Transport: &http.Transport{
 		Proxy:                 nil,
-		DialContext:           dial,
+		DialContext:           p.dial,
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   30 * time.Second,
 		ResponseHeaderTimeout: time.Minute,
@@ -130,6 +105,33 @@ func (p *fetchPolicy) client() *http.Client {
 		MaxIdleConns:          maxFetching,
 		IdleConnTimeout:       90 * time.Second,
 	}}
+}
+
+// dial connects to addr only at an address the policy allows, resolving it itself.
+func (p *fetchPolicy) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, err
+	}
+	d := &net.Dialer{Timeout: 10 * time.Second} // per address, tried in turn
+	err = errNotAllowed                         // also when the name has no address
+	for _, a := range ips {
+		if a = a.Unmap(); !fetchAllowed(p, host, a) {
+			err = fmt.Errorf("%w (%s is %s)", errNotAllowed, host, a) // logged, not answered
+			continue
+		}
+		c, derr := d.DialContext(ctx, network, net.JoinHostPort(a.String(), port))
+		if derr == nil {
+			return c, nil
+		}
+		err = derr
+	}
+	return nil, err
 }
 
 var errNotAllowed = fetchError("the origin's address is not one a fetch may reach")
