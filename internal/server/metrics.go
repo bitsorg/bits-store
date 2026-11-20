@@ -6,12 +6,15 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"io/fs"
 	"log"
 	"maps"
 	"net/http"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/bitsorg/bits-store/internal/index"
@@ -32,11 +35,17 @@ var metricsDoc = [][3]string{
 	{"bits_store_bytes", "gauge", "Bytes under an architecture."},
 	{"bits_store_objects_total", "gauge", "Objects in the bucket."},
 	{"bits_store_bytes_total", "gauge", "Bytes in the bucket."},
+	{"bits_store_content_objects", "gauge", "Objects in the bucket under a key prefix of its bindings, not under a longer one (binding \"(none)\": the rest)."},
+	{"bits_store_content_bytes", "gauge", "Bytes in the bucket under a key prefix of its bindings, not under a longer one (binding \"(none)\": the rest)."},
 	{"bits_store_manifest_objects", "gauge", "Objects under an architecture by the certified build first listing them."},
 	{"bits_store_manifest_bytes", "gauge", "Bytes under an architecture by the certified build first listing them."},
 	{"bits_store_index_drift", "gauge", "What the last listing found the index to differ in."},
 	{"bits_store_index_verified_seconds", "gauge", "When the last listing began (Unix time)."},
 	{"bits_store_index_errors_total", "counter", "The service's writes the index failed to record."},
+	{"bits_store_git_repositories", "gauge", "Repositories a git binding mirrors, by host (on -data)."},
+	{"bits_store_git_bytes", "gauge", "Bytes of a git binding's repositories, by host (on -data)."},
+	{"bits_store_data_size_bytes", "gauge", "Size of the file system -data is on."},
+	{"bits_store_data_free_bytes", "gauge", "Bytes free on the file system -data is on."},
 }
 
 // metrics answers /metrics from the index (Prometheus text).
@@ -101,6 +110,9 @@ func (s *Server) collect(ctx context.Context) (map[string][]string, error) {
 		}
 		add("bits_store_objects_total", vol+"}", c.Objects)
 		add("bits_store_bytes_total", vol+"}", c.Bytes)
+		if err := s.collectContent(ctx, bucket, vol, c, add); err != nil {
+			return nil, err
+		}
 		if err := s.collectPackages(ctx, bucket, vol, tars[bucket], add); err != nil {
 			return nil, err
 		}
@@ -110,7 +122,91 @@ func (s *Server) collect(ctx context.Context) (map[string][]string, error) {
 		add("bits_store_index_verified_seconds", vol+"}", at.Unix())
 	}
 	add("bits_store_index_errors_total", "", s.index.Errors())
+	if s.git.root != "" {
+		s.collectGit(add)
+	}
 	return m, nil
+}
+
+// collectContent splits a bucket's total by its bindings' key prefixes, each without
+// what a longer one inside it holds; the rest is binding "(none)". Labels: the key
+// prefix, its bindings' path prefixes and its format.
+func (s *Server) collectContent(ctx context.Context, bucket, vol string, total index.Count,
+	add func(name, labels string, v int64)) error {
+	paths, format := map[string][]string{}, map[string]string{}
+	for _, b := range s.bindings {
+		if s.place[b.Volume] != bucket {
+			continue
+		}
+		p := strings.Trim(b.KeyPrefix, "/")
+		if !slices.Contains(paths[p], b.Prefix) {
+			paths[p] = append(paths[p], b.Prefix)
+		}
+		format[p] = cmp.Or(format[p], b.Format)
+	}
+	within := func(q, p string) bool { return q != p && (p == "" || strings.HasPrefix(q, p+"/")) }
+	ps := slices.SortedFunc(maps.Keys(paths), func(a, b string) int { return cmp.Compare(len(b), len(a)) })
+	own, rest := map[string]index.Count{}, total
+	for _, p := range ps { // longest first: what is inside p is known
+		c, err := s.index.Under(ctx, bucket, p)
+		if err != nil {
+			return err
+		}
+		for q, o := range own {
+			if within(q, p) {
+				c.Objects, c.Bytes = c.Objects-o.Objects, c.Bytes-o.Bytes
+			}
+		}
+		own[p] = c
+		rest.Objects, rest.Bytes = rest.Objects-c.Objects, rest.Bytes-c.Bytes
+	}
+	line := func(p, paths, f string, c index.Count) {
+		l := fmt.Sprintf("%s,key_prefix=%s,binding=%s,format=%s}", vol, quote(p), quote(paths), quote(f))
+		add("bits_store_content_objects", l, c.Objects)
+		add("bits_store_content_bytes", l, c.Bytes)
+	}
+	for _, p := range slices.Sorted(maps.Keys(own)) {
+		line(p, strings.Join(paths[p], ","), format[p], own[p])
+	}
+	if _, ok := own[""]; !ok {
+		line("", "(none)", "", rest)
+	}
+	return nil
+}
+
+// collectGit is each git binding's repositories and their bytes on -data, by host,
+// and the size and free bytes of the file system -data is on.
+func (s *Server) collectGit(add func(name, labels string, v int64)) {
+	for _, b := range s.bindings {
+		if b.Format != "git" {
+			continue
+		}
+		dir := filepath.Join(s.git.root, filepath.FromSlash(b.KeyPrefix))
+		repos, size := map[string]int64{}, map[string]int64{}
+		filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
+			rel, _ := filepath.Rel(dir, p)
+			host, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
+			if err != nil || rel == "." {
+				return nil
+			}
+			if d.IsDir() && strings.HasSuffix(d.Name(), ".git") {
+				repos[host]++
+			} else if i, err := d.Info(); err == nil && d.Type().IsRegular() {
+				size[host] += i.Size()
+			}
+			return nil
+		})
+		for _, h := range slices.Sorted(maps.Keys(size)) {
+			l := "{binding=" + quote(b.Prefix) + ",host=" + quote(h) + "}"
+			add("bits_store_git_repositories", l, repos[h])
+			add("bits_store_git_bytes", l, size[h])
+		}
+	}
+	var st syscall.Statfs_t
+	if syscall.Statfs(s.git.root, &st) == nil {
+		add("bits_store_data_size_bytes", "", int64(st.Blocks)*int64(st.Bsize))
+		add("bits_store_data_free_bytes", "", int64(st.Bavail)*int64(st.Bsize))
+	}
 }
 
 // collectPackages sums a bucket's packages (under its tarballs prefixes) by

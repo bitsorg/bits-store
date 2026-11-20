@@ -223,14 +223,21 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   site's scraper only): for each bucket listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first
   segment under each `tarballs` binding's key prefix), `bits_store_objects_total`,
-  `bits_store_bytes_total`; `bits_store_manifest_objects` and `_bytes` by `manifest`,
+  `bits_store_bytes_total`, and what each content type adds to them:
+  `bits_store_content_objects` and `_bytes` by `key_prefix` (of the bucket's
+  bindings), `binding` and `format`, without what a longer key prefix inside it
+  holds, the rest as binding `(none)`, so that they add up to the totals;
+  `bits_store_manifest_objects` and `_bytes` by `manifest`,
   `arch` and `signed`: a package goes to the first build (by id) whose BOM lists it
   among the sources of verified common manifests (of all, without `manifest_keys`),
   `signed` when a verified one names it, else to `(uncertified)` (`(restricted)` behind
   a gate); what its last listing found (`bits_store_index_drift`, `kind` missing,
   changed or extra) and when
   it began (`bits_store_index_verified_seconds`); `bits_store_index_errors_total`,
-  the writes the index failed to record. It is computed at most every 15 minutes (a
+  the writes the index failed to record; with `-data`, each `git` binding's
+  repositories there by host (`bits_store_git_repositories`, `bits_store_git_bytes`),
+  and the size and free bytes of `-data`'s file system (`bits_store_data_size_bytes`,
+  `bits_store_data_free_bytes`). It is computed at most every 15 minutes (a
   scan of the index; scrapes in between share its answer), in the background, not
   bound to the scrape that asked (a large index can take longer than a scraper waits):
   a scrape waits up to 5 seconds for a newer answer, else gets the last (at most 30

@@ -239,6 +239,16 @@ func (x *Index) Total(ctx context.Context, bucket string) (c Count, err error) {
 	return c, err
 }
 
+// Under is a bucket's objects under prefix (a folder without its "/"; "": the bucket).
+func (x *Index) Under(ctx context.Context, bucket, prefix string) (c Count, err error) {
+	if prefix == "" {
+		return x.Total(ctx, bucket)
+	}
+	err = x.db.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(size), 0) FROM objects
+		WHERE bucket = ? AND key >= ? AND key < ?`, bucket, prefix+"/", prefix+"0").Scan(&c.Objects, &c.Bytes)
+	return c, err
+}
+
 // Verified returns when the bucket was last verified, and what was found; ok
 // is false when it never was.
 func (x *Index) Verified(ctx context.Context, bucket string) (at time.Time, d Drift, ok bool, err error) {
