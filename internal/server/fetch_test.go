@@ -147,6 +147,10 @@ func TestFetchServesAMissingSource(t *testing.T) {
 	if w := do(s, "GET", path, map[string]string{"Authorization": "Bearer " + tok}); w.Code != 302 {
 		t.Fatalf("a read without url: %d", w.Code)
 	}
+	if b := do(s, "GET", "/metrics", nil).Body.String(); !strings.Contains(b, `bits_store_fills_total{format="sources",result="ok"} 1`+"\n") ||
+		!strings.Contains(b, `bits_store_fill_bytes_total{format="sources"} 14`+"\n") {
+		t.Fatalf("the fill not metered:\n%s", b)
+	}
 }
 
 func TestFetchRefusals(t *testing.T) {
@@ -622,6 +626,9 @@ func TestFetchBudgets(t *testing.T) {
 	left := now.UTC().Truncate(24*time.Hour).Add(24*time.Hour).Sub(now) / time.Second
 	if ra := w.Header().Get("Retry-After"); w.Code != 429 || ra != fmt.Sprint(int(left)+1) {
 		t.Fatalf("over the budget: %d %v %s", w.Code, w.Header(), w.Body)
+	}
+	if b := do(s, "GET", "/metrics", nil).Body.String(); !strings.Contains(b, `bits_store_fills_refused_total{format="sources",reason="throttled"} 1`+"\n") {
+		t.Fatalf("the refusal not metered:\n%s", b)
 	}
 	if get(0).Code != 302 || o.hits.Load() != 2 {
 		t.Fatal("a stored archive needs no budget")

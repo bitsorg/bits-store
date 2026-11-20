@@ -219,8 +219,15 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   who, when and `-gc-apply`'s code. A file deleted by the service (an apply, `PUT
   /_admin/delete`) leaves its index at once; `-gc-apply` on the host leaves that to the
   next listing.
-- `/metrics` (with the index; Prometheus text, no token: block it in front, for the
-  site's scraper only): for each bucket listed at least once, named by its first
+- `/metrics` (Prometheus text, no token: block it in front, for the site's scraper
+  only): what the service does since it started, by binding (`(none)`: none) and
+  format: `bits_store_requests_total` (by method and status),
+  `bits_store_request_seconds` (a histogram), `bits_store_response_bytes_total`; fetches
+  from upstream: `bits_store_fills_total` (by `result` ok or failed),
+  `bits_store_fill_bytes_total` (not git's), `bits_store_fills_refused_total` (by
+  `reason` full or throttled), `bits_store_fetches_running`; `bits_store_goroutines`,
+  `bits_store_heap_bytes`, `bits_store_start_seconds`. With the index, for each bucket
+  listed at least once, named by its first
   volume, `bits_store_objects` and `bits_store_bytes` by architecture (the first
   segment under each `tarballs` binding's key prefix), `bits_store_objects_total`,
   `bits_store_bytes_total`, and what each content type adds to them:

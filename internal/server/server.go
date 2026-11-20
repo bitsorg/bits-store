@@ -44,6 +44,7 @@ type Server struct {
 	markers     markerCache
 	uploads     *uploadTable
 	fetches     *fetchTable
+	meters      *meters // what the service does, for /metrics
 	policy      *fetchPolicy
 	fetchClient *http.Client
 	plain       map[string]objectStore // volume -> plain URLs, for public bindings
@@ -108,7 +109,7 @@ func New(c *Config) (*Server, error) {
 		}
 	}
 	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
-		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{},
+		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{}, meters: newMeters(time.Now()),
 		policy: pol, fetchClient: pol.client(), plain: map[string]objectStore{}, accessLog: accessLog,
 		health: &volumeHealth{}, pages: &pageCache{}, git: &gitShared{refreshed: map[string]time.Time{}}, verifyEvery: every, manifestKeys: mkeys, reads: &readTable{}, signer: signer,
 		access: accessOf(c, bs, mkeys)}
@@ -134,7 +135,11 @@ func New(c *Config) (*Server, error) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	code, t, p := s.serve(w, r)
+	start, mw := time.Now(), &meterWriter{ResponseWriter: w}
+	code, t, p := s.serve(mw, r)
+	if p != "/health" && p != "/metrics" {
+		s.meters.request(mw.b, r.Method, code, mw.n, time.Since(start))
+	}
 	switch {
 	case p == "/health", p == "/metrics" && code == http.StatusOK, s.accessLog == "none": // a failing volume is logged by its probe
 		return
@@ -190,6 +195,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		return fail(w, http.StatusBadRequest), nil, p
 	}
 	b, key, dir := s.resolve(segs)
+	if mw, ok := w.(*meterWriter); ok {
+		mw.b = b // for the meters
+	}
 	now := s.now()
 	if write && b != nil && b.Format == "git" && strings.HasSuffix(p, "/git-upload-pack") {
 		write = false // git's fetch is a POST: a read

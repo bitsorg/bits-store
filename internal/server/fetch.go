@@ -114,6 +114,19 @@ func (ft *fetchTable) join(k, sub, domain string, budget *fetchPolicy, now time.
 	return j, true, nil
 }
 
+// running is how many fetches run now.
+func (ft *fetchTable) running() int {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	n := 0
+	for _, j := range ft.m {
+		if j.until.IsZero() {
+			n++
+		}
+	}
+	return n
+}
+
 // finish records a fetch's outcome: a failure is remembered for failTTL while
 // there is room, except errBusy, which the next ask retries.
 func (ft *fetchTable) finish(k string, j *fetchJob, err error, now time.Time) {
@@ -178,11 +191,13 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 	job, fresh, err := s.fetches.join(k, t.Sub, domainOf(host), budget, now)
 	switch {
 	case errors.Is(err, errThrottled):
+		s.meters.refuse(b.Format, "throttled")
 		log.Printf("fetch %s from %s for %s: throttled", key, src, who)
 		midnight := now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
 		w.Header().Set("Retry-After", fmt.Sprint(int(midnight.Sub(now).Seconds())+1))
 		return failMsg(w, http.StatusTooManyRequests, "throttled")
 	case err != nil:
+		s.meters.refuse(b.Format, "full")
 		w.Header().Set("Retry-After", "30")
 		return failMsg(w, http.StatusServiceUnavailable, "full")
 	}
@@ -191,6 +206,7 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 		go func() {
 			start := time.Now()
 			n, err := s.fetch(b.Volume, b.MaxSize, key, src, t.Sub, "")
+			s.meters.fill(b.Format, n, err)
 			if err != nil {
 				log.Printf("fetch %s from %s for %s failed after %d bytes, %s: %v", key, src, who, n, time.Since(start).Round(time.Millisecond), err)
 			} else {

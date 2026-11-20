@@ -76,6 +76,7 @@ func (r *Reloader) Check() (bool, error) {
 	}
 	s.uploads, s.fetches, s.now, s.index, s.reads, s.withdrawn, s.gc, s.pages, s.git = old.uploads, old.fetches, old.now, old.index, old.reads, old.withdrawn, old.gc, old.pages, old.git
 	s.fetches.forgetFailures() // the new policy may allow what failed
+	s.meters = old.meters
 	r.cur.Store(s)
 	s.failingVolumes(s.now()) // probed now, not at the first /health
 	return true, nil

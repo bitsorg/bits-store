@@ -48,12 +48,25 @@ var metricsDoc = [][3]string{
 	{"bits_store_data_free_bytes", "gauge", "Bytes free on the file system -data is on."},
 }
 
-// metrics answers /metrics from the index (Prometheus text).
+// metrics answers /metrics (Prometheus text): from the index, when there is one, and
+// the meters.
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) int {
-	if s.index == nil {
-		return fail(w, http.StatusNotFound)
+	var b strings.Builder
+	if s.index != nil {
+		body, err := s.indexMetrics(r)
+		if err != nil {
+			return fail(w, http.StatusInternalServerError) // logged when computed; a scraper that gave up: never seen
+		}
+		b.WriteString(body)
 	}
-	body, err := s.scrape.get(r.Context(), s.now(), metricsEvery, s.now, func(ctx context.Context) (string, error) {
+	s.meters.write(&b, s.fetches.running())
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	fmt.Fprint(w, b.String())
+	return http.StatusOK
+}
+
+func (s *Server) indexMetrics(r *http.Request) (string, error) {
+	return s.scrape.get(r.Context(), s.now(), metricsEvery, s.now, func(ctx context.Context) (string, error) {
 		m, err := s.collect(ctx)
 		if err != nil {
 			log.Printf("metrics: %v", err)
@@ -68,12 +81,6 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) int {
 		}
 		return b.String(), nil
 	})
-	if err != nil {
-		return fail(w, http.StatusInternalServerError) // logged when computed; a scraper that gave up: never seen
-	}
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	fmt.Fprint(w, body)
-	return http.StatusOK
 }
 
 // collect is each verified bucket's objects and bytes, in all and by architecture

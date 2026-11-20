@@ -203,6 +203,10 @@ func TestGit(t *testing.T) {
 		t.Fatalf("%d fetches upstream for 4 clients of 2 new tags", n)
 	}
 
+	if b := do(s, "GET", "/metrics", nil).Body.String(); !strings.Contains(b, `bits_store_fills_total{format="git",result="ok"} `) ||
+		!strings.Contains(b, `bits_store_requests_total{binding="/git",format="git",method="POST",code="200"} `) {
+		t.Fatalf("git's fills or requests not metered:\n%s", b)
+	}
 	// upstream down: what is held is still served
 	up.srv.Close()
 	later()

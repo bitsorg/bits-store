@@ -212,6 +212,7 @@ func (s *Server) pypiFetch(b *Binding, key string, f pyFile, t *token.Token, now
 	job, fresh, err := s.fetches.join(k, sub, domainOf(host), budget, now)
 	if errors.Is(err, errFull) && s.fetches.waiting.Add(1) > maxRoomWaiting {
 		s.fetches.waiting.Add(-1) // too many waiting already: not kept this time
+		s.meters.refuse(b.Format, "full")
 	} else if errors.Is(err, errFull) {
 		go func() {
 			defer s.fetches.waiting.Add(-1)
@@ -229,12 +230,14 @@ func (s *Server) pypiFetch(b *Binding, key string, f pyFile, t *token.Token, now
 // pypiFetchJob runs a fetch join gave: a fresh one, not one running already.
 func (s *Server) pypiFetchJob(b *Binding, key string, f pyFile, sub, k string, job *fetchJob, fresh bool, err error) {
 	if err != nil {
+		s.meters.refuse(b.Format, map[bool]string{true: "throttled", false: "full"}[errors.Is(err, errThrottled)])
 		log.Printf("fetch %s from %s: %v", key, f.URL, err)
 		return
 	} else if !fresh {
 		return
 	}
 	n, err := s.fetch(b.Volume, b.MaxSize, key, f.URL, sub, f.SHA256)
+	s.meters.fill(b.Format, n, err)
 	if err != nil {
 		log.Printf("fetch %s from %s failed after %d bytes: %v", key, f.URL, n, err)
 	} else {
