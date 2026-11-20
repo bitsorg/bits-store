@@ -168,7 +168,7 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   internal network the console alone shares. A request needs an
   `Authorization: Bearer` token of a key whose `signer` is `admin` (`sub`
   `admin:<user>`), living 15 minutes at most and allowed the method and path
-  (`GET /_admin/**`; an action `PUT /_admin/<action>`);
+  (`GET /_admin/**`; an action `PUT /_admin/<action>`; a question `POST /_admin/where`);
   such a token opens no store path. Each request is logged. `GET /_admin/summary`:
   for each bucket (named by its first volume) when it was last listed, its drift and
   totals, and each binding's objects and bytes, those read in the last 30 days, a
@@ -197,6 +197,10 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   package's `listed_by` (each BOM and common manifest listing its hash under its
   architecture, the builds it names, whether one of `manifest_keys` verifies it); a
   manifest's `kind` and `builds`.
+  `POST /_admin/where` with `{"look": [{"binding": "<prefix>", "under": "<folder>"}, ...]}`
+  (2,000 at most): for each folder, in order, its first 3 objects in the index, rows
+  as a search shows them without `kept` (null: no such binding); for a page that asks
+  where many builds' files are at once, such as a build's SBOM report.
   `GET /_admin/access`: the configuration in force (as reloaded), without secrets:
   issuer, audience, lifetimes; the token keys' ids and signers; each volume's
   endpoint and bucket and whether the service holds keys for it (their values stay in

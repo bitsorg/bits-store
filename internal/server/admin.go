@@ -30,7 +30,7 @@ const (
 	readLately    = 30 * 24 * time.Hour
 )
 
-// The admin API's views (GET) and actions (PUT).
+// The admin API's views (GET), actions (PUT) and questions too long for a URL (POST).
 var (
 	adminViews = map[string]bool{adminPrefix + "summary": true, adminPrefix + "objects": true,
 		adminPrefix + "object": true, adminPrefix + "access": true, adminPrefix + "withdrawn": true,
@@ -38,6 +38,7 @@ var (
 		adminPrefix + "problems": true}
 	adminActions = map[string]bool{adminPrefix + "withdraw": true, adminPrefix + "lift": true,
 		adminPrefix + "delete": true, adminPrefix + "gc/plan": true, adminPrefix + "gc/apply": true}
+	adminQuestions = map[string]bool{adminPrefix + "where": true}
 )
 
 // ServeAdmin answers the admin API with the current Server.
@@ -61,8 +62,9 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 		return fail(w, http.StatusNotFound), nil, p
 	}
 	write := r.Method == http.MethodPut // an action, its JSON in the body
-	if r.Method != http.MethodGet && r.Method != http.MethodHead && !write {
-		w.Header().Set("Allow", "GET, HEAD, PUT")
+	ask := r.Method == http.MethodPost  // a question, its JSON in the body
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !write && !ask {
+		w.Header().Set("Allow", "GET, HEAD, PUT, POST")
 		return fail(w, http.StatusMethodNotAllowed), nil, p
 	}
 	segs, err := token.ParsePath(p)
@@ -84,10 +86,13 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 	case !t.Allows(r.Method, segs):
 		return fail(w, http.StatusForbidden), t, p
 	}
-	if acts := adminActions[p]; acts != write && (acts || adminViews[p]) {
-		if acts {
+	if acts, asks := adminActions[p], adminQuestions[p]; (acts || asks || adminViews[p]) && (acts != write || asks != ask) {
+		switch {
+		case acts:
 			w.Header().Set("Allow", "PUT")
-		} else {
+		case asks:
+			w.Header().Set("Allow", "POST")
+		default:
 			w.Header().Set("Allow", "GET, HEAD")
 		}
 		return fail(w, http.StatusMethodNotAllowed), t, p
@@ -122,6 +127,8 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 		return s.adminObjects(w, r, rawQuery), t, p
 	case adminPrefix + "object":
 		return s.adminObject(w, r, rawQuery), t, p
+	case adminPrefix + "where":
+		return s.adminWhere(w, r), t, p
 	case adminPrefix + "fills":
 		return s.adminFills(w, rawQuery), t, p
 	case adminPrefix + "git":
@@ -779,7 +786,12 @@ func under(b *Binding, key string) bool {
 
 // readJSON decodes a small JSON body (4 KiB at most, known fields only) into v.
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
-	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10))
+	return readJSONUpTo(w, r, v, 4<<10)
+}
+
+// readJSONUpTo decodes a JSON body of max bytes at most (known fields only) into v.
+func readJSONUpTo(w http.ResponseWriter, r *http.Request, v any, max int64) bool {
+	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, max))
 	d.DisallowUnknownFields()
 	return d.Decode(v) == nil && d.Decode(&struct{}{}) == io.EOF
 }
