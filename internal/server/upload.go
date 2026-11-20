@@ -132,6 +132,7 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 	if t.Grp != "" {
 		u.meta["bits-group"] = url.PathEscape(t.Grp) // its writer (not in a listing)
 	}
+	u.meta["bits-by"] = url.PathEscape(t.Sub) // who uploaded it
 	if req.PartMD5 != nil {
 		var ok bool
 		u.partMD5, u.md5Hex, ok = checkParts(req.Size, req.PartSize, req.PartMD5)
@@ -289,6 +290,7 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 		s.uploads.markDone(id) // first: a retry must not look for the staged object
 		if s.index != nil {
 			o := index.Object{Key: u.key, Size: fi.Size, ETag: fi.ETag, Mtime: now, SHA256: u.sha256, Grp: writer(fi)}
+			o.Origin, o.Sub = originOf(fi)
 			if err := s.index.Put(ctx, place, o, s.now()); err != nil {
 				s.errorf("index_write_failed", u.key, "index %s: %v", u.key, err) // a verify adds it
 			}
@@ -483,6 +485,20 @@ func (ut *uploadTable) release(volume, key string) {
 	ut.mu.Lock()
 	defer ut.mu.Unlock()
 	delete(ut.busy, volume+"\x00"+key)
+}
+
+// originOf is how an object came through the service and for whom, from its metadata
+// (the first writer's): fetched by, or uploaded by, a token's subject; "": not known.
+func originOf(fi objInfo) (string, string) {
+	if by, ok := fi.Meta["fetched-by"]; ok {
+		by, _ = url.PathUnescape(by)
+		return index.OriginFill, by
+	}
+	if by, ok := fi.Meta["bits-by"]; ok {
+		by, _ = url.PathUnescape(by)
+		return index.OriginUpload, by
+	}
+	return "", ""
 }
 
 // writer is the group that wrote an object through the service; "": not known.

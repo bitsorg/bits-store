@@ -304,6 +304,16 @@ func TestAdminObjects(t *testing.T) {
 	if rows, _ := get(200, "order=written&limit=1&binding="+url.QueryEscape(tars)); len(rows) != 1 || !rows[0].Written.Equal(newest.Written) {
 		t.Errorf("newest first: %q, want written %v", keys(rows), newest.Written)
 	}
+	// Added by hand, or fetched: by the objects' origin, with who
+	x.Put(ctx, at, index.Object{Key: "TT/el9/dist/by-hand.tar.gz", Size: 1, ETag: "h", Mtime: s.now(), Origin: index.OriginUpload, Sub: "alice"}, s.now())
+	x.Put(ctx, at, index.Object{Key: "TT/el9/dist/fetched.tar.gz", Size: 1, ETag: "f", Mtime: s.now(), Origin: index.OriginFill, Sub: "job/7"}, s.now())
+	if rows, _ := get(200, "origin=upload&binding="+url.QueryEscape(tars)); keys(rows) != "el9/dist/by-hand.tar.gz" || rows[0].By != "alice" || rows[0].Origin != "upload" {
+		t.Errorf("uploaded: %q %+v", keys(rows), rows)
+	}
+	if rows, _ := get(200, "origin=fill&binding="+url.QueryEscape(tars)); keys(rows) != "el9/dist/fetched.tar.gz" || rows[0].By != "job/7" {
+		t.Errorf("fetched: %q", keys(rows))
+	}
+	get(400, "origin=copy&binding="+url.QueryEscape(tars))
 	get(400, "order=size&binding="+url.QueryEscape(tars))
 	get(400, "order=reads&after="+url.QueryEscape("TT/el9")+"&binding="+url.QueryEscape(tars))
 	get(404, "binding=/nowhere")

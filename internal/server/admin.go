@@ -401,6 +401,8 @@ type ObjectRow struct {
 	Reads   int64      `json:"reads"`
 	ReadAt  *time.Time `json:"read_at"`
 	Writer  string     `json:"writer,omitempty"` // the group whose token wrote it, when known
+	Origin  string     `json:"origin,omitempty"` // upload or fill, when it came through the service
+	By      string     `json:"by,omitempty"`     // the subject of the token that wrote or fetched it
 	Group   string     `json:"group,omitempty"`  // the folder behind a gate
 	Arch    string     `json:"arch,omitempty"`
 	Hash    string     `json:"hash,omitempty"`
@@ -438,7 +440,7 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery s
 		prefix = strings.TrimPrefix(prefix+"/"+u, "/")
 	}
 	text, after, kind, kept, limit := strings.ToLower(q.Get("q")), q.Get("after"), q.Get("kind"), q.Get("kept"), 100
-	order := q.Get("order")
+	order, origin := q.Get("order"), q.Get("origin")
 	var since, before time.Time
 	switch {
 	case len(text) > 200:
@@ -447,6 +449,8 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery s
 		return failMsg(w, http.StatusBadRequest, "after")
 	case order != "" && order != index.OrderReads && order != index.OrderWritten:
 		return failMsg(w, http.StatusBadRequest, "order")
+	case origin != "" && origin != index.OriginUpload && origin != index.OriginFill:
+		return failMsg(w, http.StatusBadRequest, "origin")
 	case kind != "" && (b.Format != "manifests" || !slices.Contains([]string{index.KindBOM, index.KindCommon, "none"}, kind)):
 		return failMsg(w, http.StatusBadRequest, "kind")
 	case kept != "" && (b.Format != "tarballs" || !slices.Contains(whys, kept)):
@@ -488,7 +492,7 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery s
 		switch {
 		case text != "" && !strings.Contains(strings.ToLower(o.Key), text),
 			!since.IsZero() && o.Mtime.Before(since), !before.IsZero() && !o.Mtime.Before(before),
-			kind != "" && k != kind,
+			kind != "" && k != kind, origin != "" && o.Origin != origin,
 			kept != "" && verdicts[o.Key] != kept:
 			return true
 		}
@@ -515,7 +519,7 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery s
 // objectRow is o of binding b as the admin API shows it, with the verdict kept.
 func objectRow(b *Binding, o index.Object, kept string) ObjectRow {
 	row := ObjectRow{Key: o.Key, Size: o.Size, ETag: o.ETag, Written: o.Mtime.UTC(), Reads: o.Reads,
-		Writer: o.Grp, Kept: kept}
+		Writer: o.Grp, Origin: o.Origin, By: o.Sub, Kept: kept}
 	if !o.ReadAt.IsZero() {
 		at := o.ReadAt.UTC()
 		row.ReadAt = &at

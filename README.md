@@ -179,10 +179,12 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   in key order: `under` a folder (an architecture, `<group>/<arch>`, `rev-index`),
   `q` text in the key (any case), `kind` (`bom`, `common`, or `none`: read and not a
   manifest; a manifests binding's), written `since` or `before` (a date or RFC 3339), `kept` (a tarballs
-  binding's), `after` a key, `limit` rows (100; at most 500); or, with `order=reads`
+  binding's), `origin` (`upload`: added by a client, or `fill`: fetched from upstream,
+  through the service), `after` a key, `limit` rows (100; at most 500); or, with `order=reads`
   (most read first) or `order=written` (newest first), the first `limit` rows,
   without `after` and `next`. Each row has the key,
-  size, ETag, write time, reads, last read, writer group; a package its architecture,
+  size, ETag, write time, reads, last read, writer group, its `origin` and `by` (the
+  token's subject that uploaded or fetched it; index layout 7, unknown before); a package its architecture,
   hash, file (and group behind a gate) and `kept`, the collection's verdict with its
   default options, refusals aside (recomputed at most every 5 minutes): `listed` (a
   manifest or BOM lists its hash), `uncertified-arch`, `young`, `read`, `newest`,

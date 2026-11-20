@@ -49,15 +49,16 @@ func TestAPromoteIsIndexed(t *testing.T) {
 	sum := sha256.Sum256(data)
 	o, ok := indexed(t, s, "s3", finalKey)
 	if !ok || o.Size != int64(len(data)) || o.ETag != m.etag(finalKey) || o.SHA256 != hex.EncodeToString(sum[:]) ||
-		o.Grp != "lhcb" || m.meta[finalKey]["bits-group"] != "lhcb" {
-		t.Fatalf("not indexed as promoted, with its writer's group: %+v %v %v", o, ok, m.meta[finalKey])
+		o.Grp != "lhcb" || m.meta[finalKey]["bits-group"] != "lhcb" || o.Origin != index.OriginUpload || o.Sub == "" ||
+		m.meta[finalKey]["bits-by"] == "" {
+		t.Fatalf("not indexed as promoted, with its writer's group and subject: %+v %v %v", o, ok, m.meta[finalKey])
 	}
 	// changed outside the service: its writer is not known any more
 	m.objs[finalKey] = []byte("other bytes")
 	now := s.now()
 	s.now = func() time.Time { return now.Add(s.verifyEvery) }
 	s.verifyDue(context.Background(), map[string]time.Time{})
-	if o, _ := indexed(t, s, "s3", finalKey); o.Grp != "" {
+	if o, _ := indexed(t, s, "s3", finalKey); o.Grp != "" || o.Origin != "" || o.Sub != "" {
 		t.Fatalf("a changed object kept its writer: %+v", o)
 	}
 	if _, ok := indexed(t, s, "s3", "STAGING/"+st.ID); ok {
@@ -75,11 +76,12 @@ func TestTheWriterIsTheObjects(t *testing.T) {
 	data := []byte("package tarball")
 	st := start(t, s, final, tok, data)
 	m.upload("STAGING/"+st.ID, data)
-	m.objs[finalKey], m.meta[finalKey] = data, map[string]string{"bits-group": "at%2Flas"} // came first
+	m.objs[finalKey], m.meta[finalKey] = data, map[string]string{"bits-group": "at%2Flas", "fetched-by": "job%2F7"} // came first
 	if w := post(s, final+"?complete="+st.ID, tok, ""); w.Code != 201 {
 		t.Fatalf("complete: %d", w.Code)
 	}
-	if o, _ := indexed(t, s, "s3", finalKey); o.Grp != "at/las" || m.meta[finalKey]["bits-group"] != "at%2Flas" {
+	if o, _ := indexed(t, s, "s3", finalKey); o.Grp != "at/las" || m.meta[finalKey]["bits-group"] != "at%2Flas" ||
+		o.Origin != index.OriginFill || o.Sub != "job/7" {
 		t.Fatalf("the first writer not kept: %+v", o)
 	}
 	delete(m.objs, finalKey)

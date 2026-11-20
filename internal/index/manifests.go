@@ -303,7 +303,7 @@ func (x *Index) Search(ctx context.Context, bucket, prefix, after, order string,
 		max = -1 // SQLite: no limit
 	}
 	rows, err := x.db.QueryContext(ctx, `SELECT o.key, o.size, o.etag, o.mtime, coalesce(o.sha256, ''), o.reads,
-		o.read_at, o.grp, coalesce(m.kind, '') FROM objects o
+		o.read_at, o.grp, o.origin, o.sub, coalesce(m.kind, '') FROM objects o
 		LEFT JOIN manifests m ON m.bucket = o.bucket AND m.key = o.key
 		WHERE o.bucket = ?`+where+` ORDER BY `+orders[order]+` LIMIT ?`, append(args, max)...)
 	if err != nil {
@@ -314,7 +314,7 @@ func (x *Index) Search(ctx context.Context, bucket, prefix, after, order string,
 		var o Object
 		var mtime, readAt int64
 		var kind string
-		if err := rows.Scan(&o.Key, &o.Size, &o.ETag, &mtime, &o.SHA256, &o.Reads, &readAt, &o.Grp, &kind); err != nil {
+		if err := rows.Scan(&o.Key, &o.Size, &o.ETag, &mtime, &o.SHA256, &o.Reads, &readAt, &o.Grp, &o.Origin, &o.Sub, &kind); err != nil {
 			return err
 		}
 		o.Mtime = time.UnixMilli(mtime)

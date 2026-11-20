@@ -164,10 +164,10 @@ func TestTotal(t *testing.T) {
 	}
 }
 
-// An index of layout 4 or 5 gains the columns added since and stays: not listed
+// An index of layout 4 to 6 gains the columns added since and stays: not listed
 // again; one half migrated before (a column there already) too.
 func TestFromOlderLayouts(t *testing.T) {
-	for _, from := range []string{"4", "4 and reads", "5", "5 and grp"} {
+	for _, from := range []string{"4", "4 and reads", "5", "5 and grp", "6"} {
 		path := filepath.Join(t.TempDir(), "index.db")
 		db, err := sql.Open("sqlite", "file:"+path)
 		if err != nil {
@@ -184,16 +184,18 @@ func TestFromOlderLayouts(t *testing.T) {
 		switch from {
 		case "4 and reads":
 			alter = []string{"reads INTEGER NOT NULL DEFAULT 0"}
+		case "6":
+			alter = []string{"grp TEXT NOT NULL DEFAULT ''", "reads INTEGER NOT NULL DEFAULT 0", "read_at INTEGER NOT NULL DEFAULT 0", "6"}
 		case "5 and grp":
 			alter = []string{"grp TEXT NOT NULL DEFAULT ''"}
 			fallthrough
 		case "5":
-			alter = append(alter, "reads INTEGER NOT NULL DEFAULT 0", "read_at INTEGER NOT NULL DEFAULT 0", "")
+			alter = append(alter, "reads INTEGER NOT NULL DEFAULT 0", "read_at INTEGER NOT NULL DEFAULT 0", "5")
 		}
 		for _, c := range alter {
 			q := "ALTER TABLE objects ADD COLUMN " + c
-			if c == "" {
-				q = `PRAGMA user_version = 5`
+			if c == "5" || c == "6" {
+				q = `PRAGMA user_version = ` + c
 			}
 			if _, err := db.Exec(q); err != nil {
 				t.Fatal(err)
@@ -211,10 +213,10 @@ func TestFromOlderLayouts(t *testing.T) {
 			t.Fatalf("reads since %v, %v", since, err)
 		}
 		x.AddReads(ctx, map[[2]string]Read{{"b", "k"}: {N: 2, Last: time.UnixMilli(5)}, {"b", "none"}: {N: 1}})
-		if err := x.Put(ctx, "b", Object{Key: "w", Size: 1, ETag: "e", Grp: "lhcb"}, time.Now()); err != nil {
+		if err := x.Put(ctx, "b", Object{Key: "w", Size: 1, ETag: "e", Grp: "lhcb", Origin: OriginUpload, Sub: "alice"}, time.Now()); err != nil {
 			t.Fatal(err)
 		}
-		if o, _, err := x.Get(ctx, "b", "w"); err != nil || o.Grp != "lhcb" {
+		if o, _, err := x.Get(ctx, "b", "w"); err != nil || o.Grp != "lhcb" || o.Origin != OriginUpload || o.Sub != "alice" {
 			t.Fatalf("from %s: the writer's group not kept: %+v %v", from, o, err)
 		}
 		x.Close()
