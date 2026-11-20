@@ -239,7 +239,8 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
 - `GET /_admin/fills?since=<YYYY-MM-DD>`: the fetches from upstream since that day (30
   days by default), by format and host, the most first: `ok`, `failed`, `refused` (no
   room, or the host's budget spent) and `bytes`. Counted by day in the index (with it),
-  kept 400 days; past 1,000 hosts in a minute, the rest count as `(other)`.
+  kept 400 days; past 1,000 hosts a day, the rest count as `(other)` (a
+  `fill_hosts_folded` problem says so).
 - `GET /_admin/git`: the git bindings' repositories on `-data`, the largest first: each
   one's binding, `repo` (host/path), `bytes`, `kept` (checkouts kept for builds,
   `refs/bits/*`) and when its refs were `refreshed` last (null: not since the
