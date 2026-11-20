@@ -75,6 +75,7 @@ def gen():
         ("head-allowed-by-get", good, "HEAD", "/sources/archives/root-6.32.tar.gz", "allow"),
         ("star-matches-empty", good, G, "/store/lhcb/x86_64-el10/ab", "allow"),
         ("put-allowed", good, "PUT", R, "allow"),
+        ("post-allowed", C({"m": "POST", "p": "/_admin/where"}), "POST", "/_admin/where", "allow"),
         ("allowed-punctuation", C({"m": G, "p": "/a/~+!@=,:._-"}), G, "/a/~+!@=,:._-", "allow"),
         ("exp-at-leeway-edge", T(exp=NOW - 60), G, P, "allow"),
         ("iat-at-leeway-edge", T(iat=NOW + 60, exp=NOW + 3600), G, P, "allow"),
@@ -92,6 +93,8 @@ def gen():
         ("put-needs-put", good, "PUT", "/store/lhcb/x86_64-el10-gcc15-opt/ab/0123abcd", "deny"),
         ("get-not-implied-by-put", C({"m": "PUT", "p": "/store/lhcb/**"}), G, "/store/lhcb/a", "deny"),
         ("head-not-implied-by-put", C({"m": "PUT", "p": "/store/lhcb/**"}), "HEAD", "/store/lhcb/a", "deny"),
+        ("post-not-implied-by-put", C({"m": "PUT", "p": "/_admin/**"}), "POST", "/_admin/where", "deny"),
+        ("get-not-implied-by-post", C({"m": "POST", "p": "/_admin/**"}), G, "/_admin/where", "deny"),
         ("doublestar-needs-a-segment", good, G, "/store/lhcb/x86_64-el10-gcc14-opt", "deny"),
         ("star-stays-in-segment", good, G, "/sources/archives/a/b", "deny"),
         ("method-not-granted", good, "DELETE", P, "deny"),
@@ -319,7 +322,7 @@ def verify(token, v):
         raise Bad("cap")
     caps = []
     for e in c["cap"]:
-        if not isinstance(e, dict) or set(e) != {"m", "p"} or e["m"] not in ("GET", "PUT") \
+        if not isinstance(e, dict) or set(e) != {"m", "p"} or e["m"] not in ("GET", "PUT", "POST") \
                 or not isinstance(e["p"], str):
             raise Bad("cap entry")
         caps.append((e["m"], pattern(e["p"])))

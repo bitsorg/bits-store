@@ -85,12 +85,12 @@ Each entry of `cap` is an object with exactly the members `m` and `p`:
 
 | Member | Value |
 |---|---|
-| `m` | `"GET"` (also allows `HEAD`) or `"PUT"` (create a new object) |
+| `m` | `"GET"` (also allows `HEAD`), `"PUT"` (create a new object) or `"POST"` (a question too long for a URL, such as the admin API's `where`) |
 | `p` | a pattern over logical paths |
 
 An unknown method, a missing or extra member, or a malformed pattern makes the whole
 token invalid: a restriction the verifier does not understand must not be dropped.
-PUT does not imply GET, nor GET PUT.
+No method implies another.
 
 ## Paths and patterns
 

@@ -48,6 +48,13 @@
    "outcome": "allow"
   },
   {
+   "name": "post-allowed",
+   "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJ0ZXN0LTEifQ.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImFsaWNlIiwgImdycCI6ICJsaGNiIiwgImlhdCI6IDE3OTk5OTk0MDAsICJleHAiOiAxODAwMDAzNjAwLCAianRpIjogInQtMSIsICJjYXAiOiBbeyJtIjogIlBPU1QiLCAicCI6ICIvX2FkbWluL3doZXJlIn1dfQ.qvptecjxUH0EnG-JoXDbE_7eE3PdTOyRY-2XK3n3lBmD542VuBszm2zyU-bj8PYuFzpucHZHGPd2R3hmsk-aAg",
+   "method": "POST",
+   "path": "/_admin/where",
+   "outcome": "allow"
+  },
+  {
    "name": "allowed-punctuation",
    "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJ0ZXN0LTEifQ.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImFsaWNlIiwgImdycCI6ICJsaGNiIiwgImlhdCI6IDE3OTk5OTk0MDAsICJleHAiOiAxODAwMDAzNjAwLCAianRpIjogInQtMSIsICJjYXAiOiBbeyJtIjogIkdFVCIsICJwIjogIi9hL34rIUA9LDouXy0ifV19.S3W42-aC_JIJMV9BeRW83n94Xm287LI9vnUM8NX1FN5_9GdqUX7T89EwyvtNMVbEBuQBj5TyBhkF_7Q8Z3FxCA",
    "method": "GET",
@@ -150,6 +157,20 @@
    "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJ0ZXN0LTEifQ.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImFsaWNlIiwgImdycCI6ICJsaGNiIiwgImlhdCI6IDE3OTk5OTk0MDAsICJleHAiOiAxODAwMDAzNjAwLCAianRpIjogInQtMSIsICJjYXAiOiBbeyJtIjogIlBVVCIsICJwIjogIi9zdG9yZS9saGNiLyoqIn1dfQ.INWrtMzjZ9UwKiXmwahmmkI41mSIEGlwMs4sb8HSx9HJoO3BVwwXhV0sAZ4uCQLZgFC6qE8mmPbKbhWClWGFDg",
    "method": "HEAD",
    "path": "/store/lhcb/a",
+   "outcome": "deny"
+  },
+  {
+   "name": "post-not-implied-by-put",
+   "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJ0ZXN0LTEifQ.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImFsaWNlIiwgImdycCI6ICJsaGNiIiwgImlhdCI6IDE3OTk5OTk0MDAsICJleHAiOiAxODAwMDAzNjAwLCAianRpIjogInQtMSIsICJjYXAiOiBbeyJtIjogIlBVVCIsICJwIjogIi9fYWRtaW4vKioifV19.6nk7xIqZvRIqq39h9FlQAxZRx4nB8cxhvmlZoWxpJ29BxTtFYDCOvDhKmK9u3YkoK_mR2gOGO-UPHdc3KG1vAg",
+   "method": "POST",
+   "path": "/_admin/where",
+   "outcome": "deny"
+  },
+  {
+   "name": "get-not-implied-by-post",
+   "token": "eyJhbGciOiAiRWREU0EiLCAidHlwIjogImJpdHMtc3RvcmUrand0IiwgImtpZCI6ICJ0ZXN0LTEifQ.eyJpc3MiOiAiaHR0cHM6Ly9iaXRzLmV4YW1wbGUub3JnIiwgImF1ZCI6ICJleGFtcGxlLXNpdGUvc3RvcmUiLCAic3ViIjogImFsaWNlIiwgImdycCI6ICJsaGNiIiwgImlhdCI6IDE3OTk5OTk0MDAsICJleHAiOiAxODAwMDAzNjAwLCAianRpIjogInQtMSIsICJjYXAiOiBbeyJtIjogIlBPU1QiLCAicCI6ICIvX2FkbWluLyoqIn1dfQ.hhCzBi1vlKKf26bwVYBY6jNmKsyn4nEV8DSlE4XbRKCsQ5PyLcL5sv43VKYd6rb6GPwTY2mSb9lKbnkfg75jCQ",
+   "method": "GET",
+   "path": "/_admin/where",
    "outcome": "deny"
   },
   {

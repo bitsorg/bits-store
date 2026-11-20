@@ -171,7 +171,7 @@ func caps(raw json.RawMessage) ([]Cap, error) {
 			return nil, errors.New("entry")
 		}
 		method, p := str(m["m"]), str(m["p"])
-		if method != "GET" && method != "PUT" {
+		if method != "GET" && method != "PUT" && method != "POST" { // POST: a question with a body
 			return nil, fmt.Errorf("method %q", method)
 		}
 		pat, err := ParsePattern(p)
