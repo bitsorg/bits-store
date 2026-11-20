@@ -4,6 +4,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -135,12 +136,17 @@ func TestGit(t *testing.T) {
 	git(t, c, "clone", "-q", "--bare", "--filter=tree:0", url, "c.git")
 	cg := filepath.Join(c, "c.git")
 	git(t, cg, "fetch", "-q", "--filter=tree:0", "origin", "refs/tags/v1:refs/tags/v1")
-	if got := git(t, cg, "show", "v1:dir/a.txt"); got != "one" {
+	mirror := filepath.Join(s.git.root, "GIT", strings.TrimPrefix(up.srv.URL, "http://"), "up.git")
+	file := git(t, up.work, "rev-parse", v1+":dir/a.txt")
+	if _, err := gitOut(context.Background(), mirror, nil, "cat-file", "-e", file); err == nil {
+		t.Fatal("a clone and a fetch of commits: the store fetched files")
+	}
+	if got := git(t, cg, "show", "v1:dir/a.txt"); got != "one" { // the checkout names its files
 		t.Fatalf("v1:dir/a.txt through the store: %q", got)
 	}
-	mirror := filepath.Join(s.git.root, "GIT", strings.TrimPrefix(up.srv.URL, "http://"), "up.git")
-	if got := git(t, mirror, "rev-parse", "refs/bits/"+v1); got != v1 {
-		t.Fatalf("the commit wanted is not kept: %q", got)
+	tree := git(t, up.work, "rev-parse", v1+"^{tree}")
+	if got := git(t, mirror, "for-each-ref", "--format=%(objectname)", "refs/bits"); got != tree {
+		t.Fatalf("kept: %q, want the checkout's tree %s only", got, tree)
 	}
 	// a new tag upstream: fetched by name (git names it), at once
 	v2 := up.commit(t, "b.txt", "two", "v2")
@@ -192,7 +198,7 @@ func TestGit(t *testing.T) {
 	for err := range errs {
 		t.Fatal(err)
 	}
-	// a refresh, then per new commit its trees and its files: not once per client
+	// a refresh, then per new tag its files as checked out: not once per client
 	if n := up.fetches.Load() - before; n > 5 {
 		t.Fatalf("%d fetches upstream for 4 clients of 2 new tags", n)
 	}

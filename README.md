@@ -96,8 +96,9 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `git/<key_prefix>/`, served by `git http-backend` (git in the image). Before git
   answers, the store fetches what the request needs from upstream: on `ls-refs`, a
   tag the client names that it lacks, at once, and every ref after a minute (commits
-  and trees, no files); on `fetch`, the files of the commits wanted, then kept under
-  `refs/bits/<commit>`, so a branch moved or deleted upstream never loses them. A tag
+  and trees, no files); on `fetch`, the objects wanted that it lacks: files only when
+  a client names them, as a checkout does, its tree then kept under
+  `refs/bits/<tree>`, so a branch moved or deleted upstream never loses it. A tag
   held never moves (a moved one is logged, once); upstream down, what is held is
   served. One fetch per repository at a time, another request waiting for it (up to
   15 minutes); git's own fetches reach only what the fetch policy allows, and a new

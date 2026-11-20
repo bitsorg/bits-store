@@ -30,14 +30,13 @@ import (
 // A git binding (README): partial mirrors of upstream repositories under -data's
 // git/<key_prefix>, served by git http-backend (protocol v2) to partial clones. Refs
 // are fetched first, commits and trees: a tag a client names that the store lacks at
-// once, the rest every refsTTL; the files of a commit wanted when missing. Tags held
+// once, the rest every refsTTL; files as clients name them (a checkout). Tags held
 // never move.
 const (
-	refsTTL      = time.Minute      // refs a client does not name are asked upstream again after this
-	gitWait      = 15 * time.Minute // a request waits this long for the repository's fetch
-	gitRunTime   = time.Hour        // one git command upstream, at most
-	maxGitBody   = 16 << 20         // a client's request (its haves and wants)
-	maxFillRound = 8                // trees, then files: two rounds usually
+	refsTTL    = time.Minute      // refs a client does not name are asked upstream again after this
+	gitWait    = 15 * time.Minute // a request waits this long for the repository's fetch
+	gitRunTime = time.Hour        // one git command upstream, at most
+	maxGitBody = 16 << 20         // a client's request (its haves and wants)
 )
 
 var (
@@ -276,18 +275,17 @@ func (s *Server) gitPrepare(ctx context.Context, dir, upstream string, q gitReq,
 		}
 		return err
 	case "fetch":
-		if absent, files := gitMissing(ctx, dir, q.wants); len(absent)+len(files) == 0 {
-			return gitKeep(ctx, dir, q.wants)
+		if len(gitAbsent(gitTypes(ctx, dir, q.wants))) > 0 {
+			if err := s.gitLocked(ctx, dir, upstream, t, now, func(ctx context.Context) error {
+				if err := gitInit(ctx, dir, upstream); err != nil {
+					return err
+				}
+				return gitFill(ctx, dir, q.wants)
+			}); err != nil {
+				return err
+			}
 		}
-		return s.gitLocked(ctx, dir, upstream, t, now, func(ctx context.Context) error {
-			if err := gitInit(ctx, dir, upstream); err != nil {
-				return err
-			}
-			if err := gitFill(ctx, dir, q.wants); err != nil {
-				return err
-			}
-			return gitKeep(ctx, dir, q.wants)
-		})
+		return gitKeep(ctx, dir, q.wants)
 	}
 	return nil
 }
@@ -418,72 +416,56 @@ func gitRefresh(ctx context.Context, dir string) error {
 
 var gitMovedSaid sync.Map // each moved tag logged once
 
-// gitMissing is what the repository lacks: of the wanted objects (absent), and of
-// the files of those it holds (files).
-func gitMissing(ctx context.Context, dir string, wants []string) (absent, files []string) {
-	for _, w := range wants {
-		if _, err := gitOut(ctx, dir, nil, "cat-file", "-e", w); err != nil {
-			absent = append(absent, w)
-			continue
-		}
-		out, err := gitOut(ctx, dir, nil, "rev-list", "--objects", "--missing=print", "--no-walk", w)
-		if err != nil {
-			absent = append(absent, w)
-			continue
-		}
-		for _, l := range strings.Split(out, "\n") {
-			if strings.HasPrefix(l, "?") {
-				files = append(files, strings.TrimPrefix(l, "?"))
-			}
+// gitTypes is the type of each object named ("missing" for one not held).
+func gitTypes(ctx context.Context, dir string, oids []string) map[string]string {
+	types := make(map[string]string, len(oids))
+	for _, o := range oids {
+		types[o] = "missing"
+	}
+	out, _ := gitOut(ctx, dir, strings.NewReader(strings.Join(oids, "\n")+"\n"), "cat-file", "--batch-check")
+	for _, l := range strings.Split(out, "\n") {
+		if f := strings.Fields(l); len(f) >= 2 && types[f[0]] != "" {
+			types[f[0]] = f[1]
 		}
 	}
-	return absent, files
+	return types
 }
 
-// gitFill fetches what is missing, in rounds: a wanted object not held with its
-// history as the refresh keeps it (no files), files by their ids as git's lazy
-// fetch asks them, with no haves (GitHub sends no file a have reaches).
+func gitAbsent(types map[string]string) []string {
+	var absent []string
+	for o, t := range types {
+		if t == "missing" {
+			absent = append(absent, o)
+		}
+	}
+	return absent
+}
+
+// gitFill fetches the wanted objects not held, as git's lazy fetch asks them: no
+// files beyond those named, and no haves (GitHub sends no file a have reaches).
+// A client's checkout names its files, so the store keeps what builds check out.
 func gitFill(ctx context.Context, dir string, wants []string) error {
-	for round := 0; ; round++ {
-		absent, files := gitMissing(ctx, dir, wants)
-		if len(absent)+len(files) == 0 {
-			return nil
-		}
-		if round == maxFillRound {
-			return fmt.Errorf("%d objects still missing", len(absent)+len(files))
-		}
-		if len(absent) > 0 {
-			in := strings.NewReader(strings.Join(absent, "\n") + "\n")
-			if _, err := gitOut(ctx, dir, in, "fetch", "--filter=blob:none", "--no-tags",
-				"--no-write-fetch-head", "--stdin", "origin"); err == nil {
-				continue
-			}
-			files = append(files, absent...) // a file wanted outright: not sent past haves
-		}
-		in := strings.NewReader(strings.Join(files, "\n") + "\n")
-		if _, err := gitOut(ctx, dir, in, "-c", "fetch.negotiationAlgorithm=noop", "fetch", "--filter=blob:none",
-			"--no-tags", "--no-write-fetch-head", "--stdin", "origin"); err != nil {
-			return err
-		}
+	absent := gitAbsent(gitTypes(ctx, dir, wants))
+	if len(absent) == 0 {
+		return nil // fetched by the request waited for
 	}
+	in := strings.NewReader(strings.Join(absent, "\n") + "\n")
+	if _, err := gitOut(ctx, dir, in, "-c", "fetch.negotiationAlgorithm=noop", "fetch", "--filter=blob:none",
+		"--no-tags", "--no-write-fetch-head", "--stdin", "origin"); err != nil {
+		return err
+	}
+	if absent = gitAbsent(gitTypes(ctx, dir, absent)); len(absent) > 0 {
+		return fmt.Errorf("%d objects not sent by upstream", len(absent))
+	}
+	return nil
 }
 
-// gitKeep holds every commit wanted under refs/bits/<oid>, so that a branch moved
-// or deleted upstream never loses what a build used.
+// gitKeep holds each tree wanted, the root of a client's checkout, under
+// refs/bits/<oid>: what a build used stays when upstream moves or deletes it.
 func gitKeep(ctx context.Context, dir string, wants []string) error {
-	var in strings.Builder
-	for _, w := range wants {
-		if t, err := gitOut(ctx, dir, nil, "cat-file", "-t", w); err == nil && strings.TrimSpace(t) == "commit" {
-			fmt.Fprintf(&in, "create refs/bits/%s %s\n", w, w)
-		}
-	}
-	if in.Len() == 0 {
-		return nil
-	}
-	// existing ones refused, the others still made: no --atomic in update-ref --stdin
-	for _, l := range strings.SplitAfter(in.String(), "\n") {
-		if l != "" {
-			gitOut(ctx, dir, strings.NewReader(l), "update-ref", "--stdin")
+	for o, t := range gitTypes(ctx, dir, wants) {
+		if t == "tree" { // one already kept is refused: fine
+			gitOut(ctx, dir, strings.NewReader("create refs/bits/"+o+" "+o+"\n"), "update-ref", "--stdin")
 		}
 	}
 	return nil
