@@ -276,7 +276,7 @@ func (s *Server) gitPrepare(ctx context.Context, dir, upstream string, q gitReq,
 		}
 		return err
 	case "fetch":
-		if len(gitMissing(ctx, dir, q.wants)) == 0 {
+		if absent, files := gitMissing(ctx, dir, q.wants); len(absent)+len(files) == 0 {
 			return gitKeep(ctx, dir, q.wants)
 		}
 		return s.gitLocked(ctx, dir, upstream, t, now, func(ctx context.Context) error {
@@ -418,43 +418,51 @@ func gitRefresh(ctx context.Context, dir string) error {
 
 var gitMovedSaid sync.Map // each moved tag logged once
 
-// gitMissing is what of the wanted objects, or of their commits' files, the
-// repository lacks.
-func gitMissing(ctx context.Context, dir string, wants []string) []string {
-	var miss []string
+// gitMissing is what the repository lacks: of the wanted objects (absent), and of
+// the files of those it holds (files).
+func gitMissing(ctx context.Context, dir string, wants []string) (absent, files []string) {
 	for _, w := range wants {
 		if _, err := gitOut(ctx, dir, nil, "cat-file", "-e", w); err != nil {
-			miss = append(miss, w)
+			absent = append(absent, w)
 			continue
 		}
 		out, err := gitOut(ctx, dir, nil, "rev-list", "--objects", "--missing=print", "--no-walk", w)
 		if err != nil {
-			miss = append(miss, w)
+			absent = append(absent, w)
 			continue
 		}
 		for _, l := range strings.Split(out, "\n") {
 			if strings.HasPrefix(l, "?") {
-				miss = append(miss, strings.TrimPrefix(l, "?"))
+				files = append(files, strings.TrimPrefix(l, "?"))
 			}
 		}
 	}
-	return miss
+	return absent, files
 }
 
-// gitFill fetches the missing objects in batches (the files of a wanted commit;
-// trees too, for an object wanted that the refs did not bring), until none is.
+// gitFill fetches what is missing, in rounds: a wanted object not held with its
+// history as the refresh keeps it (no files), files by their ids as git's lazy
+// fetch asks them, with no haves (GitHub sends no file a have reaches).
 func gitFill(ctx context.Context, dir string, wants []string) error {
 	for round := 0; ; round++ {
-		miss := gitMissing(ctx, dir, wants)
-		if len(miss) == 0 {
+		absent, files := gitMissing(ctx, dir, wants)
+		if len(absent)+len(files) == 0 {
 			return nil
 		}
 		if round == maxFillRound {
-			return fmt.Errorf("%d objects still missing", len(miss))
+			return fmt.Errorf("%d objects still missing", len(absent)+len(files))
 		}
-		in := strings.Join(miss, "\n") + "\n"
-		if _, err := gitOut(ctx, dir, strings.NewReader(in), "fetch", "--filter=blob:none", "--no-tags",
-			"--no-write-fetch-head", "--stdin", "origin"); err != nil {
+		if len(absent) > 0 {
+			in := strings.NewReader(strings.Join(absent, "\n") + "\n")
+			if _, err := gitOut(ctx, dir, in, "fetch", "--filter=blob:none", "--no-tags",
+				"--no-write-fetch-head", "--stdin", "origin"); err == nil {
+				continue
+			}
+			files = append(files, absent...) // a file wanted outright: not sent past haves
+		}
+		in := strings.NewReader(strings.Join(files, "\n") + "\n")
+		if _, err := gitOut(ctx, dir, in, "-c", "fetch.negotiationAlgorithm=noop", "fetch", "--filter=blob:none",
+			"--no-tags", "--no-write-fetch-head", "--stdin", "origin"); err != nil {
 			return err
 		}
 	}

@@ -42,7 +42,8 @@ func gitIn(dir string, args ...string) (string, error) {
 }
 
 // gitUpstream is a repository served by git http-backend, counting the fetches
-// made of it (protocol v2's command=fetch).
+// made of it (protocol v2's command=fetch); like GitHub, it sends no file wanted
+// by its id past haves (refused here, omitted there).
 type gitUpstream struct {
 	srv     *httptest.Server
 	work    string
@@ -65,6 +66,10 @@ func newGitUpstream(t *testing.T) *gitUpstream {
 			b, _ := io.ReadAll(r.Body)
 			if bytes.Contains(b, []byte("command=fetch")) {
 				u.fetches.Add(1)
+				if u.filePastHaves(b) {
+					http.Error(w, "a file wanted past haves", http.StatusBadRequest)
+					return
+				}
 			}
 			r.Body = io.NopCloser(bytes.NewReader(b))
 		}
@@ -72,6 +77,20 @@ func newGitUpstream(t *testing.T) *gitUpstream {
 	}))
 	t.Cleanup(u.srv.Close)
 	return u
+}
+
+func (u *gitUpstream) filePastHaves(body []byte) bool {
+	if !bytes.Contains(body, []byte("have ")) {
+		return false
+	}
+	for _, l := range strings.Split(string(body), "want ")[1:] {
+		if len(l) >= 40 {
+			if typ, _ := gitIn(filepath.Join(u.work, "..", "up.git"), "cat-file", "-t", l[:40]); strings.TrimSpace(typ) == "blob" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // commit adds a file and tags the commit (moved with force, as upstreams do).
