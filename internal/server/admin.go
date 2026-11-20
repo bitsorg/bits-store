@@ -448,7 +448,7 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery s
 		prefix = strings.TrimPrefix(prefix+"/"+u, "/")
 	}
 	text, after, kind, kept, limit := strings.ToLower(q.Get("q")), q.Get("after"), q.Get("kind"), q.Get("kept"), 100
-	order, origin := q.Get("order"), q.Get("origin")
+	order, origin, by := q.Get("order"), q.Get("origin"), q.Get("by")
 	var since, before time.Time
 	switch {
 	case len(text) > 200:
@@ -459,6 +459,8 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery s
 		return failMsg(w, http.StatusBadRequest, "order")
 	case origin != "" && origin != index.OriginUpload && origin != index.OriginFill:
 		return failMsg(w, http.StatusBadRequest, "origin")
+	case by != "" && by != "people":
+		return failMsg(w, http.StatusBadRequest, "by")
 	case kind != "" && (b.Format != "manifests" || !slices.Contains([]string{index.KindBOM, index.KindCommon, "none"}, kind)):
 		return failMsg(w, http.StatusBadRequest, "kind")
 	case kept != "" && (b.Format != "tarballs" || !slices.Contains(whys, kept)):
@@ -501,6 +503,7 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery s
 		case text != "" && !strings.Contains(strings.ToLower(o.Key), text),
 			!since.IsZero() && o.Mtime.Before(since), !before.IsZero() && !o.Mtime.Before(before),
 			kind != "" && k != kind, origin != "" && o.Origin != origin,
+			by != "" && (o.Origin != index.OriginUpload || strings.HasPrefix(o.Sub, "build:")),
 			kept != "" && verdicts[o.Key] != kept:
 			return true
 		}

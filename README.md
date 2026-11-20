@@ -182,7 +182,7 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `q` text in the key (any case), `kind` (`bom`, `common`, or `none`: read and not a
   manifest; a manifests binding's), written `since` or `before` (a date or RFC 3339), `kept` (a tarballs
   binding's), `origin` (`upload`: added by a client, or `fill`: fetched from upstream,
-  through the service), `after` a key, `limit` rows (100; at most 500); or, with `order=reads`
+  through the service), `by=people` (uploads by people's tokens, not builds'), `after` a key, `limit` rows (100; at most 500); or, with `order=reads`
   (most read first) or `order=written` (newest first), the first `limit` rows,
   without `after` and `next`. Each row has the key,
   size, ETag, write time, reads, last read, writer group, its `origin` and `by` (the
