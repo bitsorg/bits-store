@@ -4,7 +4,6 @@ package server
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"regexp"
 	"slices"
@@ -37,7 +36,7 @@ func (s *Server) answerRevisions(w http.ResponseWriter, r *http.Request, b *Bind
 	st := s.stores[b.Volume]
 	keys, err := st.List(r.Context(), key+"-")
 	if err != nil {
-		log.Printf("list %s-: %v", key, err)
+		s.errorf("volume_request_failed", key, "list %s-: %v", key, err)
 		return fail(w, http.StatusBadGateway)
 	}
 	out := map[string]string{}
@@ -48,7 +47,7 @@ func (s *Server) answerRevisions(w http.ResponseWriter, r *http.Request, b *Bind
 		}
 		h, err := s.markers.get(r, st, s.place[b.Volume], k, s.now())
 		if err != nil {
-			log.Printf("get %s: %v", k, err)
+			s.errorf("volume_request_failed", k, "get %s: %v", k, err)
 			return fail(w, http.StatusBadGateway)
 		}
 		if h != "" {

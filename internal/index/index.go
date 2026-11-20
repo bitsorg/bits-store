@@ -82,9 +82,16 @@ CREATE TABLE IF NOT EXISTS manifest_entries (
   package TEXT NOT NULL, version TEXT NOT NULL,
   PRIMARY KEY (bucket, key, arch, hash)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS manifest_entries_by_hash ON manifest_entries (bucket, arch, hash);
-CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);`
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS problems (  -- the service's warnings and errors (problems.go)
+  id      INTEGER PRIMARY KEY,
+  first   INTEGER NOT NULL, last INTEGER NOT NULL,  -- ms
+  count   INTEGER NOT NULL,
+  level   TEXT NOT NULL, kind TEXT NOT NULL, subject TEXT NOT NULL, message TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS problems_by_kind ON problems (kind, subject, last);
+CREATE INDEX IF NOT EXISTS problems_by_last ON problems (last, id);`
 
-var tables = []string{"objects", "verified", "manifests", "manifest_builds", "manifest_entries", "meta"}
+var tables = []string{"objects", "verified", "manifests", "manifest_builds", "manifest_entries", "meta", "problems"}
 
 // Open opens (or creates) the index file at path.
 func Open(path string) (*Index, error) {

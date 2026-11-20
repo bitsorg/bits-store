@@ -4,6 +4,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sort"
 	"strings"
@@ -68,7 +69,7 @@ func (s *Server) verifyDue(ctx context.Context, failed map[string]time.Time) {
 		}
 		at, _, ok, err := s.index.Verified(ctx, bucket)
 		if err != nil {
-			log.Printf("index: volume %q: %v", name, err)
+			s.errorf("index_read_failed", name, "index: volume %q: %v", name, err)
 			continue
 		}
 		if ok && s.now().Sub(at) < s.verifyEvery {
@@ -87,14 +88,18 @@ func (s *Server) verifyDue(ctx context.Context, failed map[string]time.Time) {
 		cancel()
 		if err != nil {
 			failed[bucket] = s.now()
-			log.Printf("index: volume %q not verified, again in %s: %v", name, verifyRetry, err)
+			s.errorf("listing_failed", name, "index: volume %q not verified, again in %s: %v", name, verifyRetry, err)
 			continue
 		}
 		delete(failed, bucket)
 		if _, err := s.index.DropGoneManifests(ctx, bucket); err != nil {
-			log.Printf("index: volume %q: manifests: %v", name, err)
+			s.errorf("index_write_failed", name, "index: volume %q: manifests: %v", name, err)
 		}
 		log.Printf("index: volume %q verified in %s: %d missing, %d changed, %d extra",
 			name, s.now().Sub(start).Round(time.Second), d.Missing, d.Changed, d.Extra)
+		if ok && d.Missing+d.Changed+d.Extra > 0 { // not a first listing: changed outside the service
+			s.record(levelWarning, "index_drift", name, fmt.Sprintf("volume %q: %d objects not written through the service, %d changed, %d gone",
+				name, d.Missing, d.Changed, d.Extra))
+		}
 	}
 }

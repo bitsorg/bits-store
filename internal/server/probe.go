@@ -80,7 +80,7 @@ func (s *Server) failingVolumes(now time.Time) []string {
 			for n, err := range bad {
 				names, why[n] = append(names, n), err.Error()
 				if h.why[n] != why[n] {
-					log.Printf("volume %q: %v", n, err) // the detail stays in the log
+					s.errorf("volume_unreachable", n, "volume %q: %v", n, err) // the detail stays in the log
 				}
 			}
 			for n := range h.why {

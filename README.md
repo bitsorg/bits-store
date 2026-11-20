@@ -219,6 +219,19 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   who, when and `-gc-apply`'s code. A file deleted by the service (an apply, `PUT
   /_admin/delete`) leaves its index at once; `-gc-apply` on the host leaves that to the
   next listing.
+- Problems: the service's warnings and errors are logged as before and, with the
+  index, kept there 30 days, the same one (`level`, `kind`, `subject`, `message`)
+  within an hour counted on one row (`first`, `last`, `count`). `GET
+  /_admin/problems?since=<ms>&limit=<n>` lists those last seen at or after `since`,
+  oldest first (up to 1000); a reader asks again from the last one's `last`. Kinds:
+  `volume_unreachable`, `volume_request_failed`, `presign_failed`, `promote_failed`,
+  `promote_conflict`, `staging_left`, `index_read_failed`, `index_write_failed`,
+  `index_drift` (after a first listing), `listing_failed`, `manifests_unread`,
+  `reads_dropped`, `fill_failed`, `fill_refused`, `fill_throttled`,
+  `pypi_page_failed`, `git_failed`, `git_backend`, `git_upstream_down`, `tag_moved`,
+  `git_no_data`, `git_missing`, `collection_failed`, `metrics_failed`,
+  `config_rejected`, `disk_low` (less than a tenth of `-data`'s file system free),
+  `internal`.
 - `/metrics` (Prometheus text, no token: block it in front, for the site's scraper
   only): what the service does since it started, by binding (`(none)`: none) and
   format: `bits_store_requests_total` (by method and status),

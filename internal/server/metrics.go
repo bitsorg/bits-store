@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
-	"log"
 	"maps"
 	"net/http"
 	"path/filepath"
@@ -23,6 +22,9 @@ import (
 // metricsEvery is how often /metrics (and the admin summary) is computed again: the
 // store's totals change slowly, and on a large index one computation is a heavy scan.
 const metricsEvery = 15 * time.Minute
+
+// lowDisk: less than 1/lowDisk of -data's file system free is a problem.
+const lowDisk = 10
 
 // label quotes a label value as the text format has it: \\, \" and \n only.
 var label = strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`)
@@ -69,7 +71,7 @@ func (s *Server) indexMetrics(r *http.Request) (string, error) {
 	return s.scrape.get(r.Context(), s.now(), metricsEvery, s.now, func(ctx context.Context) (string, error) {
 		m, err := s.collect(ctx)
 		if err != nil {
-			log.Printf("metrics: %v", err)
+			s.errorf("metrics_failed", "", "metrics: %v", err)
 			return "", err
 		}
 		var b strings.Builder
@@ -211,8 +213,12 @@ func (s *Server) collectGit(add func(name, labels string, v int64)) {
 	}
 	var st syscall.Statfs_t
 	if syscall.Statfs(s.git.root, &st) == nil {
-		add("bits_store_data_size_bytes", "", int64(st.Blocks)*int64(st.Bsize))
-		add("bits_store_data_free_bytes", "", int64(st.Bavail)*int64(st.Bsize))
+		size, free := int64(st.Blocks)*int64(st.Bsize), int64(st.Bavail)*int64(st.Bsize)
+		add("bits_store_data_size_bytes", "", size)
+		add("bits_store_data_free_bytes", "", free)
+		if free*lowDisk < size {
+			s.warnf("disk_low", "-data", "-data's file system: %s free of %s", bytesOf(free), bytesOf(size))
+		}
 	}
 }
 

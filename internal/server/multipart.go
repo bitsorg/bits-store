@@ -8,7 +8,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 )
@@ -83,7 +82,7 @@ func (s *Server) assemble(parent context.Context, u *upload, id string) (int, st
 		return ok && si.Size == u.size && si.ETag == u.md5Hex, err
 	}
 	if ok, err := assembled(); err != nil {
-		log.Printf("stat %s: %v", u.staging, err)
+		s.errorf("volume_request_failed", u.staging, "stat %s: %v", u.staging, err)
 		return http.StatusBadGateway, ""
 	} else if ok {
 		return 0, "" // a retry, or a complete at the same time
@@ -93,7 +92,7 @@ func (s *Server) assemble(parent context.Context, u *upload, id string) (int, st
 		if ok, _ := assembled(); ok {
 			return 0, ""
 		}
-		log.Printf("list parts %s: %v", u.staging, err)
+		s.errorf("volume_request_failed", u.staging, "list parts %s: %v", u.staging, err)
 		return http.StatusBadGateway, ""
 	}
 	byN := map[int]partInfo{}
@@ -117,7 +116,7 @@ func (s *Server) assemble(parent context.Context, u *upload, id string) (int, st
 		if ok, _ := assembled(); ok {
 			return 0, ""
 		}
-		log.Printf("complete parts %s: %v", u.staging, err)
+		s.errorf("volume_request_failed", u.staging, "complete parts %s: %v", u.staging, err)
 		return http.StatusBadGateway, ""
 	}
 	return 0, ""

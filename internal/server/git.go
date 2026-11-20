@@ -142,7 +142,7 @@ func (s *Server) serveGit(w http.ResponseWriter, r *http.Request, b *Binding, ke
 	upstream := gitScheme + "://" + repo
 	info := strings.HasSuffix(p, "/info/refs")
 	if s.git.root == "" {
-		log.Printf("git binding %q: no -data to keep repositories in", b.Prefix)
+		s.errorf("git_no_data", b.Prefix, "git binding %q: no -data to keep repositories in", b.Prefix)
 		return fail(w, http.StatusServiceUnavailable)
 	}
 	if info && r.URL.Query().Get("service") != "git-upload-pack" {
@@ -174,14 +174,14 @@ func (s *Server) serveGit(w http.ResponseWriter, r *http.Request, b *Binding, ke
 			return failMsg(w, http.StatusBadRequest, "a partial mirror: clone with --filter=tree:0 or blob:none")
 		}
 		if err := s.gitPrepare(r.Context(), dir, upstream, req, t, now); err != nil {
-			log.Printf("git %s: %v", repo, err)
+			s.errorf("git_failed", repo, "git %s: %v", repo, err)
 			return fail(w, http.StatusBadGateway)
 		}
 	} else if !gitHeld(dir) {
 		if err := s.gitLocked(r.Context(), dir, upstream, t, now, func(ctx context.Context) error {
 			return gitInit(ctx, dir, upstream)
 		}); err != nil {
-			log.Printf("git %s: %v", repo, err)
+			s.errorf("git_failed", repo, "git %s: %v", repo, err)
 			return fail(w, http.StatusBadGateway)
 		}
 	}
@@ -261,7 +261,7 @@ func (s *Server) gitPrepare(ctx context.Context, dir, upstream string, q gitReq,
 			if !s.gitStale(dir, now) && !missingTag(ctx, dir, q.prefixes) {
 				return nil // done by the request waited for
 			}
-			if err := gitRefresh(ctx, dir); err != nil {
+			if err := s.gitRefresh(ctx, dir, upstream); err != nil {
 				return err
 			}
 			s.git.mu.Lock()
@@ -270,7 +270,7 @@ func (s *Server) gitPrepare(ctx context.Context, dir, upstream string, q gitReq,
 			return nil
 		})
 		if err != nil && gitHeld(dir) && !missingTag(ctx, dir, q.prefixes) {
-			log.Printf("git %s: refs not refreshed, served as held: %v", dir, err) // upstream down
+			s.warnf("git_upstream_down", upstream, "git %s: refs not refreshed, served as held: %v", dir, err) // upstream down
 			return nil
 		}
 		return err
@@ -393,7 +393,7 @@ func gitInit(ctx context.Context, dir, upstream string) error {
 // gitRefresh fetches upstream's refs, commits and trees without files (git's server
 // walks the trees of what it sends, filtered or not): branches as they are now, tags
 // never moved (git refuses that, logged), HEAD as upstream's default branch.
-func gitRefresh(ctx context.Context, dir string) error {
+func (s *Server) gitRefresh(ctx context.Context, dir, upstream string) error {
 	out, err := gitOut(ctx, dir, nil, "fetch", "--filter=blob:none", "--no-tags", "--no-write-fetch-head",
 		"origin", "+refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*")
 	if err != nil {
@@ -402,7 +402,7 @@ func gitRefresh(ctx context.Context, dir string) error {
 		}
 		for _, l := range strings.Split(out, "\n") {
 			if _, said := gitMovedSaid.LoadOrStore(dir+"\x00"+l, true); !said && strings.Contains(l, "would clobber existing tag") {
-				log.Printf("git %s: a tag moved upstream, kept as it was: %s", dir, strings.TrimSpace(l))
+				s.warnf("tag_moved", upstream, "git %s: a tag moved upstream, kept as it was: %s", dir, strings.TrimSpace(l))
 			}
 		}
 	}
@@ -502,7 +502,7 @@ func (s *Server) gitBackend(w http.ResponseWriter, r *http.Request, root, repo s
 	if gitBackend == "" {
 		out, err := exec.Command(gitBinary, "--exec-path").Output()
 		if err != nil {
-			log.Printf("git --exec-path: %v", err)
+			s.errorf("git_missing", "", "git --exec-path: %v", err)
 			return fail(w, http.StatusServiceUnavailable)
 		}
 		gitBackend = filepath.Join(strings.TrimSpace(string(out)), "git-http-backend")
@@ -519,7 +519,8 @@ func (s *Server) gitBackend(w http.ResponseWriter, r *http.Request, root, repo s
 	h := &cgi.Handler{Path: gitBackend, Root: "", Env: []string{"GIT_PROJECT_ROOT=" + root,
 		"GIT_HTTP_EXPORT_ALL=1", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null",
 		"HOME=/nonexistent", "GIT_NO_LAZY_FETCH=1"}, InheritEnv: []string{"PATH"},
-		Stderr: logWriter{}}
+		Stderr: logWriter{s, repo}}
+	h.Logger = log.New(logWriter{s, repo}, "", 0) // its own errors ("CGI error"): problems too
 	sw := &statusWriter{ResponseWriter: w, code: http.StatusOK}
 	h.ServeHTTP(sw, r2)
 	return sw.code
@@ -532,9 +533,13 @@ type statusWriter struct {
 
 func (w *statusWriter) WriteHeader(c int) { w.code = c; w.ResponseWriter.WriteHeader(c) }
 
-type logWriter struct{}
+// logWriter makes what git http-backend (or its CGI handler) writes a problem.
+type logWriter struct {
+	s    *Server
+	repo string
+}
 
-func (logWriter) Write(b []byte) (int, error) {
-	log.Printf("git http-backend: %s", strings.TrimSpace(string(b)))
+func (w logWriter) Write(b []byte) (int, error) {
+	w.s.errorf("git_backend", w.repo, "git http-backend: %s", strings.TrimSpace(string(b)))
 	return len(b), nil
 }

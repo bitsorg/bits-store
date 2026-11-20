@@ -34,7 +34,8 @@ const (
 var (
 	adminViews = map[string]bool{adminPrefix + "summary": true, adminPrefix + "objects": true,
 		adminPrefix + "object": true, adminPrefix + "access": true, adminPrefix + "withdrawn": true,
-		adminPrefix + "gc": true, adminPrefix + "gc/files": true, adminPrefix + "gc/log": true}
+		adminPrefix + "gc": true, adminPrefix + "gc/files": true, adminPrefix + "gc/log": true,
+		adminPrefix + "problems": true}
 	adminActions = map[string]bool{adminPrefix + "withdraw": true, adminPrefix + "lift": true,
 		adminPrefix + "delete": true, adminPrefix + "gc/plan": true, adminPrefix + "gc/apply": true}
 )
@@ -108,6 +109,8 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 		return s.adminGC(w), t, p
 	case adminPrefix + "gc/files":
 		return s.adminGCFiles(w, rawQuery), t, p
+	case adminPrefix + "problems":
+		return s.adminProblems(w, r, rawQuery), t, p
 	case adminPrefix + "withdrawn":
 		if s.withdrawn == nil {
 			return fail(w, http.StatusNotFound), t, p

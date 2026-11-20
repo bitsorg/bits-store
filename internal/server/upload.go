@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -156,14 +155,14 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 	}
 	st := s.stores[b.Volume]
 	if _, exists, err := st.Stat(r.Context(), key); err != nil {
-		log.Printf("stat %s: %v", key, err)
+		s.errorf("volume_request_failed", key, "stat %s: %v", key, err)
 		return fail(w, http.StatusBadGateway)
 	} else if exists {
 		return failMsg(w, http.StatusConflict, "exists")
 	}
 	if dir != "" {
 		if found, err := s.others(r.Context(), b.Volume, dir, ""); err != nil {
-			log.Printf("list %s: %v", dir, err)
+			s.errorf("volume_request_failed", dir, "list %s: %v", dir, err)
 			return fail(w, http.StatusBadGateway)
 		} else if found {
 			return failMsg(w, http.StatusConflict, "exists") // under another name
@@ -188,7 +187,7 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 		kid, sig, err := s.signer.sign(r.Context(), restrictedStatement(arch, path.Base(rest), t.Grp, req.Name, req.SHA256))
 		if err != nil {
 			s.uploads.remove(id)
-			log.Printf("sign %s: %v", key, err)
+			s.errorf("presign_failed", key, "sign %s: %v", key, err)
 			return failMsg(w, http.StatusServiceUnavailable, "unsigned")
 		}
 		u.meta["bits-signature"] = kid + ":" + base64.StdEncoding.EncodeToString(sig) // read at complete: after the id is sent
@@ -198,7 +197,7 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 		parts, err := s.presignParts(r.Context(), u, req.PartMD5, expiry)
 		if err != nil {
 			s.uploads.remove(id)
-			log.Printf("start parts %s: %v", u.staging, err)
+			s.errorf("volume_request_failed", u.staging, "start parts %s: %v", u.staging, err)
 			return fail(w, http.StatusBadGateway)
 		}
 		answer["parts"] = parts
@@ -206,7 +205,7 @@ func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding,
 		loc, err := st.Presign(r.Context(), http.MethodPut, u.staging, expiry, http.Header{"Content-Md5": {req.MD5}})
 		if err != nil {
 			s.uploads.remove(id)
-			log.Printf("presign %s: %v", u.staging, err)
+			s.errorf("presign_failed", u.staging, "presign %s: %v", u.staging, err)
 			return fail(w, http.StatusBadGateway)
 		}
 		answer["url"], answer["headers"] = loc, map[string]string{"Content-MD5": req.MD5}
@@ -274,7 +273,7 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 	st := s.stores[u.volume]
 	drop := func(code int, msg string) (int, string) {
 		if err := st.Remove(ctx, u.staging); err != nil {
-			log.Printf("remove %s: %v", u.staging, err)
+			s.warnf("staging_left", u.staging, "remove %s: %v", u.staging, err)
 		}
 		s.uploads.remove(id)
 		return code, msg
@@ -291,14 +290,14 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 		if s.index != nil {
 			o := index.Object{Key: u.key, Size: fi.Size, ETag: fi.ETag, Mtime: now, SHA256: u.sha256, Grp: writer(fi)}
 			if err := s.index.Put(ctx, place, o, s.now()); err != nil {
-				log.Printf("index %s: %v", u.key, err) // a verify adds it
+				s.errorf("index_write_failed", u.key, "index %s: %v", u.key, err) // a verify adds it
 			}
 		}
 		if u.dir != "" {
 			s.found.stored(s, u.volume, u.dir, u.key, now)
 		}
 		if err := st.Remove(ctx, u.staging); err != nil {
-			log.Printf("remove %s: %v", u.staging, err)
+			s.warnf("staging_left", u.staging, "remove %s: %v", u.staging, err)
 		}
 		return http.StatusCreated, ""
 	}
@@ -342,12 +341,12 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 	switch {
 	case err != nil || !fok && copyErr != nil:
 		// the copy may still land: keep the name leased until it no longer can
-		log.Printf("promote %s: copy: %v; stat: %v", u.key, copyErr, err)
+		s.errorf("promote_failed", u.key, "promote %s: copy: %v; stat: %v", u.key, copyErr, err)
 		held = true
 		s.uploads.hold(place, name, now.Add(copyTime(u.size)))
 		return http.StatusBadGateway, "" // staging kept: the client may retry later
 	case !fok:
-		log.Printf("promote %s: the copy reported success but wrote nothing", u.key)
+		s.errorf("promote_failed", u.key, "promote %s: the copy reported success but wrote nothing", u.key)
 		return http.StatusBadGateway, ""
 	case !ours(fi):
 		// Ours only if it equals the staged object now (a backend ignoring the copy
@@ -355,12 +354,12 @@ func (s *Server) promote(parent context.Context, u *upload, id string, now time.
 		si, sok, _ := st.Stat(ctx, u.staging)
 		if sok && si.Size == fi.Size && si.ETag == fi.ETag {
 			if err := st.Remove(ctx, u.key); err != nil {
-				log.Printf("promote %s: swapped bytes copied and NOT removed: %v", u.key, err)
+				s.errorf("promote_failed", u.key, "promote %s: swapped bytes copied and NOT removed: %v", u.key, err)
 				return http.StatusBadGateway, ""
 			}
 			return drop(http.StatusUnprocessableEntity, "mismatch")
 		}
-		log.Printf("promote %s: another object appeared during the copy; left alone", u.key)
+		s.warnf("promote_conflict", u.key, "promote %s: another object appeared during the copy; left alone", u.key)
 		return drop(http.StatusConflict, "exists")
 	}
 	return done(fi)

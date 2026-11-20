@@ -176,7 +176,7 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 		return failDetail(w, http.StatusBadRequest, "bad-url", err.Error())
 	}
 	if _, ok, err := s.stores[b.Volume].Stat(r.Context(), key); err != nil {
-		log.Printf("stat %s: %v", key, err)
+		s.errorf("volume_request_failed", key, "stat %s: %v", key, err)
 		return fail(w, http.StatusBadGateway)
 	} else if ok {
 		return s.redirect(w, r, b, key, t, now)
@@ -193,6 +193,7 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 	case errors.Is(err, errThrottled):
 		s.meters.refuse(b.Format, "throttled")
 		log.Printf("fetch %s from %s for %s: throttled", key, src, who)
+		s.record(levelWarning, "fill_throttled", host, fmt.Sprintf("fetch %s from %s: throttled", key, src))
 		midnight := now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
 		w.Header().Set("Retry-After", fmt.Sprint(int(midnight.Sub(now).Seconds())+1))
 		return failMsg(w, http.StatusTooManyRequests, "throttled")
@@ -209,6 +210,7 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 			s.meters.fill(b.Format, n, err)
 			if err != nil {
 				log.Printf("fetch %s from %s for %s failed after %d bytes, %s: %v", key, src, who, n, time.Since(start).Round(time.Millisecond), err)
+				s.record(levelError, "fill_failed", key, fmt.Sprintf("fetch %s from %s failed: %v", key, src, err))
 			} else {
 				log.Printf("fetched %s from %s for %s: %d bytes in %s", key, src, who, n, time.Since(start).Round(time.Millisecond))
 			}
@@ -279,7 +281,7 @@ func (s *Server) fetch(volume string, maxSize int64, key, src, sub, want string)
 		rctx, rcancel := context.WithTimeout(context.Background(), stepTimeout)
 		defer rcancel()
 		if err := st.Remove(rctx, staging); err != nil {
-			log.Printf("remove %s: %v", staging, err)
+			s.warnf("staging_left", staging, "remove %s: %v", staging, err)
 		}
 	}
 	body := &fetchBody{r: resp.Body, left: maxSize, stall: stall, sha: sha256.New(), md5: md5.New()}

@@ -258,7 +258,7 @@ func (s *Server) adminGCPlan(w http.ResponseWriter, r *http.Request, t *token.To
 			err = s.gc.save(id, t.Sub, plans, o, now)
 		}
 		if err != nil {
-			log.Printf("admin: collection %s: %v", id, err)
+			s.errorf("collection_failed", id, "admin: collection %s: %v", id, err)
 		}
 		s.gc.end(err, s.now())
 	}()

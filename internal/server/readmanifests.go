@@ -48,7 +48,7 @@ func (s *Server) readManifests(ctx context.Context) {
 				name, counts[index.KindBOM], counts[index.KindCommon], counts["verified"], counts[index.KindNone])
 		}
 		if err != nil {
-			log.Printf("index: volume %q: manifests not read, again in %s: %v", name, index.RetryUnread, err)
+			s.warnf("manifests_unread", name, "index: volume %q: manifests not read, again in %s: %v", name, index.RetryUnread, err)
 		}
 	}
 }

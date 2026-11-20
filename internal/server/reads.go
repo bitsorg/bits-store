@@ -4,7 +4,6 @@ package server
 
 import (
 	"context"
-	"log"
 	"sync"
 	"time"
 
@@ -48,20 +47,22 @@ func (rt *readTable) take() (map[[2]string]index.Read, int64) {
 func (s *Server) flushReads(ctx context.Context) {
 	m, dropped := s.reads.take()
 	if dropped > 0 {
-		log.Printf("index: %d reads not counted: more than %d objects read in a minute", dropped, maxReadKeys)
+		s.warnf("reads_dropped", "", "index: %d reads not counted: more than %d objects read in a minute", dropped, maxReadKeys)
 	}
 	if len(m) > 0 {
 		if err := s.index.AddReads(ctx, m); err != nil {
-			log.Printf("index: %d objects' reads lost: %v", len(m), err)
+			s.errorf("index_write_failed", "", "index: %d objects' reads lost: %v", len(m), err)
 		}
 	}
 }
 
-// FlushReads adds the reads counted to the index every verifyTick, never waiting
-// on a listing. It never returns.
+// FlushReads adds the reads counted, and the problems gathered, to the index every
+// verifyTick, never waiting on a listing. It never returns.
 func (r *Reloader) FlushReads() {
 	for {
 		time.Sleep(verifyTick)
-		r.cur.Load().flushReads(context.Background())
+		s := r.cur.Load()
+		s.flushReads(context.Background())
+		s.flushProblems(context.Background())
 	}
 }

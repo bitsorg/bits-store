@@ -45,6 +45,7 @@ type Server struct {
 	uploads     *uploadTable
 	fetches     *fetchTable
 	meters      *meters // what the service does, for /metrics
+	problems    *problemTable
 	policy      *fetchPolicy
 	fetchClient *http.Client
 	plain       map[string]objectStore // volume -> plain URLs, for public bindings
@@ -109,7 +110,7 @@ func New(c *Config) (*Server, error) {
 		}
 	}
 	s := &Server{verifier: v, bindings: bs, stores: map[string]objectStore{}, place: map[string]string{},
-		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{}, meters: newMeters(time.Now()),
+		urlLife: life, now: time.Now, uploads: &uploadTable{}, fetches: &fetchTable{}, meters: newMeters(time.Now()), problems: &problemTable{},
 		policy: pol, fetchClient: pol.client(), plain: map[string]objectStore{}, accessLog: accessLog,
 		health: &volumeHealth{}, pages: &pageCache{}, git: &gitShared{refreshed: map[string]time.Time{}}, verifyEvery: every, manifestKeys: mkeys, reads: &readTable{}, signer: signer,
 		access: accessOf(c, bs, mkeys)}
@@ -268,7 +269,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 			key, err = s.found.lookup(r.Context(), s, b, dir, now)
 		}
 		if err != nil {
-			log.Printf("list %s: %v", dir, err)
+			s.errorf("volume_request_failed", dir, "list %s: %v", dir, err)
 			return fail(w, http.StatusBadGateway), t, p
 		} else if key == "" {
 			return fail(w, http.StatusNotFound), t, p
@@ -298,7 +299,7 @@ func (s *Server) redirect(w http.ResponseWriter, r *http.Request, b *Binding, ke
 	}
 	loc, err := st.Presign(r.Context(), r.Method, key, expiry, nil)
 	if err != nil {
-		log.Printf("presign %s: %v", key, err)
+		s.errorf("presign_failed", key, "presign %s: %v", key, err)
 		return fail(w, http.StatusBadGateway)
 	}
 	if s.index != nil && r.Method == http.MethodGet {
@@ -332,11 +333,11 @@ func (s *Server) resolve(segs []string) (*Binding, string, string) {
 				return b, "", ""
 			}
 			if (it.Key == "") == (it.Dir == "") || it.Dir != "" && b.folder == nil {
-				log.Printf("format %s: neither a key nor a folder of its own", b.Format)
+				s.errorf("internal", b.Format, "format %s: neither a key nor a folder of its own", b.Format)
 				return b, "", ""
 			}
 			if _, err := token.ParsePath("/" + it.Key + it.Dir); err != nil {
-				log.Printf("format %s: bad key %q", b.Format, it.Key+it.Dir)
+				s.errorf("internal", b.Format, "format %s: bad key %q", b.Format, it.Key+it.Dir)
 				return b, "", ""
 			}
 			pre := ""

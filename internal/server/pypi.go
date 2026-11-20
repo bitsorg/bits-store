@@ -142,7 +142,7 @@ func (s *Server) servePyPI(w http.ResponseWriter, r *http.Request, b *Binding, k
 	}
 	if parts[0] == "files" {
 		if _, ok, err := s.stores[b.Volume].Stat(r.Context(), key); err != nil {
-			log.Printf("stat %s: %v", key, err)
+			s.errorf("volume_request_failed", key, "stat %s: %v", key, err)
 			return fail(w, http.StatusBadGateway)
 		} else if ok {
 			return s.redirect(w, r, b, key, t, now)
@@ -153,7 +153,7 @@ func (s *Server) servePyPI(w http.ResponseWriter, r *http.Request, b *Binding, k
 	case errors.Is(err, errNoProject):
 		return fail(w, http.StatusNotFound)
 	case err != nil:
-		log.Printf("pypi page %s: %v", parts[1], err)
+		s.errorf("pypi_page_failed", parts[1], "pypi page %s: %v", parts[1], err)
 		return fail(w, http.StatusBadGateway)
 	case parts[0] == "simple":
 		return s.pypiPage(w, b, parts[1], page)
@@ -231,7 +231,7 @@ func (s *Server) pypiFetch(b *Binding, key string, f pyFile, t *token.Token, now
 func (s *Server) pypiFetchJob(b *Binding, key string, f pyFile, sub, k string, job *fetchJob, fresh bool, err error) {
 	if err != nil {
 		s.meters.refuse(b.Format, map[bool]string{true: "throttled", false: "full"}[errors.Is(err, errThrottled)])
-		log.Printf("fetch %s from %s: %v", key, f.URL, err)
+		s.warnf("fill_refused", key, "fetch %s from %s: %v", key, f.URL, err)
 		return
 	} else if !fresh {
 		return
@@ -239,7 +239,7 @@ func (s *Server) pypiFetchJob(b *Binding, key string, f pyFile, sub, k string, j
 	n, err := s.fetch(b.Volume, b.MaxSize, key, f.URL, sub, f.SHA256)
 	s.meters.fill(b.Format, n, err)
 	if err != nil {
-		log.Printf("fetch %s from %s failed after %d bytes: %v", key, f.URL, n, err)
+		s.errorf("fill_failed", key, "fetch %s from %s failed after %d bytes: %v", key, f.URL, n, err)
 	} else {
 		log.Printf("fetched %s from %s: %d bytes", key, f.URL, n)
 	}
