@@ -75,7 +75,8 @@ type Binding struct {
 	Format    string `json:"format"`     // empty: "blob", the path is the key
 	Public    bool   `json:"public"`
 	MaxSize   int64  `json:"max_size"` // bytes a fetch may bring (Mirror formats, pypi); 0: 32 GiB
-	Index     string `json:"index"`    // pypi: the index mirrored (PEP 691); empty: https://pypi.org/simple
+	Index     string `json:"index"`    // pypi: the index mirrored (PEP 691); empty: https://pypi.org/simple; crates: its sparse index, https://index.crates.io
+	URL       string `json:"url"`      // crates: the binding's address as cargo reaches it (https://host/prefix)
 	Gate      string `json:"gate"`     // "group": each group's builds its own, read by it and its readers
 	// With a gate: the groups that also read a group's builds, {"sft": ["lhcb"]}.
 	Readers map[string][]string `json:"readers"`
@@ -206,7 +207,7 @@ func (c *Config) bindings() ([]Binding, error) {
 		b.mirror, _ = b.format.(format.Mirror)
 		b.folder, _ = b.format.(format.Folder)
 		b.revisions, _ = b.format.(format.Revisions)
-		fetches := b.mirror != nil || b.Format == "pypi"
+		fetches := b.mirror != nil || b.Format == "pypi" || b.Format == "crates"
 		switch {
 		case !fetches && b.MaxSize != 0:
 			return nil, fmt.Errorf("binding %q: max_size is for formats that fetch", b.Prefix)
@@ -215,8 +216,13 @@ func (c *Config) bindings() ([]Binding, error) {
 		case fetches && b.MaxSize == 0:
 			b.MaxSize = defaultMaxSize
 		}
-		if b.Format != "pypi" && b.Index != "" {
-			return nil, fmt.Errorf("binding %q: index is a pypi binding's", b.Prefix)
+		if b.Format != "pypi" && b.Format != "crates" && b.Index != "" {
+			return nil, fmt.Errorf("binding %q: index is a pypi or crates binding's", b.Prefix)
+		}
+		if u, err := url.Parse(b.URL); (b.Format == "crates") != (b.URL != "") ||
+			b.URL != "" && (err != nil || u.Scheme != "https" && u.Scheme != "http" || u.Host == "" || u.RawQuery != "" ||
+				!strings.HasSuffix(strings.TrimSuffix(u.Path, "/"), b.Prefix)) {
+			return nil, fmt.Errorf("binding %q: url, a crates binding's only, is its http(s)://host%s", b.Prefix, b.Prefix)
 		}
 		if u, err := url.Parse(b.Index); b.Index != "" && (err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "") {
 			return nil, fmt.Errorf("binding %q: index is an https:// URL", b.Prefix)

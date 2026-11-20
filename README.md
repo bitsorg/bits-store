@@ -89,6 +89,19 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   page lists only what the index lists. Its files' links are https (or the index's
   scheme); without their `core-metadata` pip downloads each file it considers. Nothing
   is written to it.
+- `crates` mirrors a Cargo registry's sparse index (`index`; `https://index.crates.io`
+  when unset) for cargo, `public` as `pypi`; its `url` is its own address as cargo
+  reaches it (`https://<host><prefix>`), and cargo replaces crates.io with
+  `sparse+<url>/index/` (bits does so in its containers). `GET <prefix>/index/config.json`
+  points downloads here (`<url>/crates`); `<prefix>/index/<path>` answers the index's
+  file of a crate (`1/<n>`, `2/<n>`, `3/<c>/<n>`, `<ab>/<cd>/<n>`), asked again after 5
+  minutes and served as last read while the index cannot answer. `GET
+  <prefix>/crates/<crate>/<version>/download`: a crate the store holds
+  (`files/<crate>/<crate>-<version>.crate`) is read from it; one it does not is sent to
+  the registry's download (its `config.json`'s `dl`, `302`) while the store fetches it,
+  once, keeping it only when its SHA-256 is the `cksum` the index lists, as `pypi`'s
+  files (`max_size`, fetch budgets: make `static.crates.io` `trusted`). A kept crate
+  stays readable when the registry drops it. Nothing is written to it.
 - `git` mirrors git repositories for git's smart HTTP, protocol v2:
   `<prefix>/<host>/<path>` is `https://<host>/<path>` (`.git` or not), read with
   `git clone --filter=tree:0` (or `blob:none`) and `git fetch`; bits points sources
@@ -228,7 +241,7 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `promote_conflict`, `staging_left`, `index_read_failed`, `index_write_failed`,
   `index_drift` (after a first listing), `listing_failed`, `manifests_unread`,
   `reads_dropped`, `fill_failed`, `fill_refused`, `fill_throttled`,
-  `pypi_page_failed`, `git_failed`, `git_backend`, `git_upstream_down`, `tag_moved`,
+  `pypi_page_failed`, `crates_index_failed`, `git_failed`, `git_backend`, `git_upstream_down`, `tag_moved`,
   `git_no_data`, `git_missing`, `collection_failed`, `metrics_failed`,
   `config_rejected`, `disk_low` (less than a tenth of `-data`'s file system free),
   `internal`.

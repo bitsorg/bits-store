@@ -58,6 +58,22 @@ var conformance = map[string][]routeCase{
 		{[]string{"files", "numpy", strings.Repeat("ab", 32)}, ""},
 		{[]string{"simple"}, ""},
 	},
+	"crates": {
+		{[]string{"index", "config.json"}, "index/config.json"},
+		{[]string{"index", "1", "a"}, "index/1/a"},
+		{[]string{"index", "2", "cc"}, "index/2/cc"},
+		{[]string{"index", "3", "l", "log"}, "index/3/l/log"},
+		{[]string{"index", "se", "rd", "serde"}, "index/se/rd/serde"},
+		{[]string{"index", "se", "rd", "Serde"}, ""}, // index paths are lower case
+		{[]string{"index", "xx", "rd", "serde"}, ""},
+		{[]string{"index", "3", "x", "log"}, ""},
+		{[]string{"crates", "serde", "1.0.215", "download"}, "files/serde/serde-1.0.215.crate"},
+		{[]string{"crates", "Inflector", "0.11.4", "download"}, "files/Inflector/Inflector-0.11.4.crate"},
+		{[]string{"crates", "x", "1.0.0-beta.1+build.5", "download"}, "files/x/x-1.0.0-beta.1+build.5.crate"},
+		{[]string{"crates", "serde", "latest", "download"}, ""},
+		{[]string{"crates", "serde", "1.0.215"}, ""},
+		{[]string{"crates", "../x", "1.0.0", "download"}, ""},
+	},
 	"sources": {
 		{[]string{"9e", "9e107d9d372bb6826bd81d3542a419d6", "a.tar.gz"}, "9e/9e107d9d372bb6826bd81d3542a419d6/a.tar.gz"},
 		{[]string{"9f", "9e107d9d372bb6826bd81d3542a419d6", "a.tar.gz"}, ""},

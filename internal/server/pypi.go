@@ -248,8 +248,11 @@ func (s *Server) pypiFetchJob(b *Binding, key string, f pyFile, sub, k string, j
 
 // index is the index a pypi binding mirrors.
 func (b *Binding) index() string {
-	if b.Index != "" {
+	switch {
+	case b.Index != "":
 		return b.Index
+	case b.Format == "crates":
+		return cratesIndex
 	}
 	return pypiIndex
 }
