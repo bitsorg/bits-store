@@ -78,6 +78,8 @@ func TestAdminAuth(t *testing.T) {
 		{"user-sub", "GET", "/_admin/summary", bearer(adminToken(t, s, "alice", time.Minute, "GET /_admin/**")), 401},
 		{"post", "POST", "/_admin/summary", bearer(adminToken(t, s, "admin:alice", time.Minute, "POST /_admin/**")), 405},
 		{"delete", "DELETE", "/_admin/summary", bearer(admin), 405},
+		{"put-a-view", "PUT", "/_admin/git", bearer(adminToken(t, s, "admin:alice", time.Minute, "PUT /_admin/**")), 405},
+		{"post-a-view", "POST", "/_admin/fills", bearer(adminToken(t, s, "admin:alice", time.Minute, "POST /_admin/**")), 405},
 		{"unknown", "GET", "/_admin/nothing", bearer(admin), 404},
 		{"a-store-path", "GET", "/store/lhcb/x86_64-el10/ab", bearer(admin), 404},
 	} {

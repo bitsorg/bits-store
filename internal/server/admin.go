@@ -30,12 +30,13 @@ const (
 	readLately    = 30 * 24 * time.Hour
 )
 
-// The admin API's views (GET), actions (PUT) and questions too long for a URL (POST).
+// The admin API's views (GET), actions (PUT) and questions too long for a URL (POST):
+// each path must be in one, else any method its token allows answers it.
 var (
 	adminViews = map[string]bool{adminPrefix + "summary": true, adminPrefix + "objects": true,
 		adminPrefix + "object": true, adminPrefix + "access": true, adminPrefix + "withdrawn": true,
 		adminPrefix + "gc": true, adminPrefix + "gc/files": true, adminPrefix + "gc/log": true,
-		adminPrefix + "problems": true}
+		adminPrefix + "problems": true, adminPrefix + "git": true, adminPrefix + "fills": true}
 	adminActions = map[string]bool{adminPrefix + "withdraw": true, adminPrefix + "lift": true,
 		adminPrefix + "delete": true, adminPrefix + "gc/plan": true, adminPrefix + "gc/apply": true}
 	adminQuestions = map[string]bool{adminPrefix + "where": true}
