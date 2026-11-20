@@ -122,6 +122,11 @@ func (s *Server) serveAdmin(w http.ResponseWriter, r *http.Request) (int, *token
 		return s.adminObjects(w, r, rawQuery), t, p
 	case adminPrefix + "object":
 		return s.adminObject(w, r, rawQuery), t, p
+	case adminPrefix + "git":
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		json.NewEncoder(w).Encode(map[string]any{"repos": s.gitRepos(r.Context())})
+		return http.StatusOK, t, p
 	case adminPrefix + "access":
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Cache-Control", "no-store")

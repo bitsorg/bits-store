@@ -887,3 +887,46 @@ func TestAdminGCApply(t *testing.T) {
 		}
 	}
 }
+
+// The git bindings' repositories: their bytes, kept checkouts (loose or packed refs)
+// and last refresh, the largest first.
+func TestAdminGit(t *testing.T) {
+	s, _, _, _ := gcSetup(t)
+	s.bindings = append(s.bindings, Binding{Prefix: "/git", Volume: "s3", KeyPrefix: "GIT", Format: "git", Public: true})
+	s.git.root = t.TempDir()
+	put := func(name, text string) {
+		p := filepath.Join(s.git.root, "GIT", filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("github.com/root-project/root.git/objects/pack/p.pack", strings.Repeat("x", 100))
+	put("github.com/root-project/root.git/refs/bits/aa", "aa\n")
+	put("github.com/root-project/root.git/refs/bits/bb", "bb\n")
+	put("github.com/root-project/root.git/packed-refs", "# pack-refs\ncc refs/bits/cc\ndd refs/tags/v1\n")
+	put("gitlab.cern.ch/x/y.git/HEAD", "ref: refs/heads/main\n")
+	put("gitlab.cern.ch/stray", "not a repository")
+	at := s.now().Add(-time.Hour)
+	s.git.mu.Lock()
+	s.git.refreshed[filepath.Join(s.git.root, "GIT", "gitlab.cern.ch", "x", "y.git")] = at
+	s.git.mu.Unlock()
+	auth := map[string]string{"Authorization": "Bearer " + adminToken(t, s, "admin:alice", time.Minute, "GET /_admin/git")}
+	w := doAdmin(s, "GET", "/_admin/git", auth)
+	var a struct{ Repos []GitRepo }
+	if err := json.Unmarshal(w.Body.Bytes(), &a); w.Code != 200 || err != nil || len(a.Repos) != 2 {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	root, y := a.Repos[0], a.Repos[1]
+	if root.Repo != "github.com/root-project/root" || root.Binding != "/git" || root.Kept != 3 || root.Bytes < 100 || root.Refreshed != nil {
+		t.Errorf("root: %+v", root)
+	}
+	if y.Repo != "gitlab.cern.ch/x/y" || y.Kept != 0 || y.Refreshed == nil || !y.Refreshed.Equal(at) {
+		t.Errorf("y: %+v", y)
+	}
+	if w := doAdmin(s, "GET", "/_admin/git", map[string]string{"Authorization": "Bearer " + adminToken(t, s, "admin:bob", time.Minute, "GET /_admin/summary")}); w.Code != 403 {
+		t.Errorf("a token for the summary alone: %d", w.Code)
+	}
+}

@@ -148,6 +148,15 @@ func TestGit(t *testing.T) {
 	if got := git(t, mirror, "for-each-ref", "--format=%(objectname)", "refs/bits"); got != tree {
 		t.Fatalf("kept: %q, want the checkout's tree %s only", got, tree)
 	}
+	if rs := s.gitRepos(context.Background()); len(rs) != 1 || rs[0].Repo != strings.TrimPrefix(up.srv.URL, "http://")+"/up" || rs[0].Kept != 1 ||
+		rs[0].Refreshed == nil || rs[0].Bytes == 0 {
+		t.Fatalf("the admin API's repositories: %+v", rs)
+	}
+	gone, stop := context.WithCancel(context.Background())
+	stop()
+	if rs := s.gitRepos(gone); len(rs) != 0 {
+		t.Fatalf("after the request ended: %+v", rs)
+	}
 	// a new tag upstream: fetched by name (git names it), at once
 	v2 := up.commit(t, "b.txt", "two", "v2")
 	git(t, cg, "fetch", "-q", "--filter=tree:0", "origin", "refs/tags/v2:refs/tags/v2")

@@ -234,6 +234,10 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   who, when and `-gc-apply`'s code. A file deleted by the service (an apply, `PUT
   /_admin/delete`) leaves its index at once; `-gc-apply` on the host leaves that to the
   next listing.
+- `GET /_admin/git`: the git bindings' repositories on `-data`, the largest first: each
+  one's binding, `repo` (host/path), `bytes`, `kept` (checkouts kept for builds,
+  `refs/bits/*`) and when its refs were `refreshed` last (null: not since the
+  service started).
 - Problems: the service's warnings and errors are logged as before and, with the
   index, kept there 30 days, the same one (`level`, `kind`, `subject`, `message`)
   within an hour counted on one row (`first`, `last`, `count`). `GET
