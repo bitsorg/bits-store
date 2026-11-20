@@ -102,6 +102,19 @@ func (s *Server) write(w http.ResponseWriter, r *http.Request, rawQuery string, 
 	return fail(w, http.StatusBadRequest)
 }
 
+// writerOf is the subject that uploaded key through the service (the index's; "" not
+// known: written before v0.8.7, by a listing, or fetched), escaped as a header value.
+func (s *Server) writerOf(ctx context.Context, b *Binding, key string) string {
+	if s.index == nil {
+		return ""
+	}
+	o, ok, err := s.index.Get(ctx, s.place[b.Volume], key)
+	if err != nil || !ok || o.Origin != index.OriginUpload {
+		return ""
+	}
+	return url.PathEscape(o.Sub)
+}
+
 func (s *Server) startUpload(w http.ResponseWriter, r *http.Request, b *Binding, key, dir string, t *token.Token, now time.Time) int {
 	var req struct {
 		Name     string   `json:"name"`

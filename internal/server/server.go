@@ -286,6 +286,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) (code int, t *tok
 		if group != "" {
 			w.Header().Set("Bits-Object-Group", group)
 		}
+		if by := s.writerOf(r.Context(), b, key); by != "" {
+			w.Header().Set("Bits-Object-By", by)
+		}
 	}
 	if b.mirror != nil && rawQuery != "" && t != nil {
 		return s.fetchRead(w, r, rawQuery, b, key, t, now), t, p

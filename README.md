@@ -33,7 +33,9 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
 - `tarballs` is bits' package store: `<arch>/<hash>` names the build of that hash,
   kept as bits writes it (key prefix `TARS`: `<arch>/store/<hash[:2]>/<hash>/<pkg>-
   <version>[-<revision>].<arch>.tar.gz`). `GET` or `HEAD <prefix>/<arch>/<hash>`
-  redirects to it, its file name in `Bits-Object-Name` (bits-store's `404` if none; of
+  redirects to it, its file name in `Bits-Object-Name` and (from v0.8.9) who uploaded
+  it in `Bits-Object-By` when it came through the service (recorded from v0.8.7): the
+  token's subject, URL-escaped; a build's `build:<job>` (bits-store's `404` if none; of
   several, in old stores, the lowest revision by number, as bits picks). An upload of a
   hash names its file in the start (`"name"`, of the path's architecture), its declared
   SHA-256 kept as `sha256` (`sha256:<hex>`), as bits' own writers keep it; it answers
