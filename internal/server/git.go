@@ -317,7 +317,7 @@ func (s *Server) gitLocked(ctx context.Context, dir, upstream string, t *token.T
 			time.Sleep(roomPoll)
 			continue
 		case err != nil:
-			s.meters.refuse("git", map[bool]string{true: "throttled", false: "full"}[errors.Is(err, errThrottled)])
+			s.meters.refuse("git", host, map[bool]string{true: "throttled", false: "full"}[errors.Is(err, errThrottled)])
 			return err
 		case !fresh:
 			select {
@@ -333,7 +333,7 @@ func (s *Server) gitLocked(ctx context.Context, dir, upstream string, t *token.T
 		wctx, cancel := context.WithTimeout(context.Background(), gitRunTime) // not the client's
 		err = work(wctx)
 		cancel()
-		s.meters.fill("git", 0, err)
+		s.meters.fill("git", host, 0, err)
 		s.fetches.finish(k, job, err, s.now())
 		return err
 	}

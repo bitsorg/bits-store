@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/bitsorg/bits-store/internal/index"
 )
 
 // meters counts what the service does, for /metrics: requests by binding, fills
@@ -24,8 +26,15 @@ type meters struct {
 	bytes     map[[2]string]int64
 	fills     map[[2]string]int64 // format, result
 	fillBytes map[string]int64
-	refused   map[[2]string]int64 // format, reason
+	refused   map[[2]string]int64       // format, reason
+	hosts     map[[3]string]*index.Fill // day, format, host: for the index, until flushed
+	hostsDay  string
+	seen      map[[2]string]bool // format, host: today's, at most maxFillHosts
+	folded    int64              // fetches counted as "(other)", until flushed
 }
+
+// maxFillHosts bounds the hosts counted a day; the rest count as "(other)".
+const maxFillHosts = 1000
 
 // requestBuckets are the request durations' histogram bounds (seconds).
 var requestBuckets = []float64{0.005, 0.025, 0.1, 0.5, 2.5, 10, 60}
@@ -38,7 +47,7 @@ type histogram struct {
 func newMeters(now time.Time) *meters {
 	return &meters{start: now, requests: map[[4]string]int64{}, seconds: map[[2]string]*histogram{},
 		bytes: map[[2]string]int64{}, fills: map[[2]string]int64{}, fillBytes: map[string]int64{},
-		refused: map[[2]string]int64{}}
+		refused: map[[2]string]int64{}, hosts: map[[3]string]*index.Fill{}}
 }
 
 func bindingOf(b *Binding) [2]string {
@@ -65,8 +74,8 @@ func (m *meters) request(b *Binding, method string, code int, n int64, d time.Du
 	h.sum += d.Seconds()
 }
 
-// fill counts a fetch from upstream: done or failed, and its bytes.
-func (m *meters) fill(format string, n int64, err error) {
+// fill counts a fetch from upstream host: done or failed, and its bytes.
+func (m *meters) fill(format, host string, n int64, err error) {
 	result := "ok"
 	if err != nil {
 		result = "failed"
@@ -75,13 +84,55 @@ func (m *meters) fill(format string, n int64, err error) {
 	defer m.mu.Unlock()
 	m.fills[[2]string{format, result}]++
 	m.fillBytes[format] += n
+	f := m.host(format, host)
+	f.Bytes += n
+	if err != nil {
+		f.Failed++
+	} else {
+		f.OK++
+	}
 }
 
 // refuse counts a fetch not started: "full" (no room) or "throttled" (budget spent).
-func (m *meters) refuse(format, reason string) {
+func (m *meters) refuse(format, host, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.refused[[2]string{format, reason}]++
+	m.host(format, host).Refused++
+}
+
+// host is today's count of a format's fetches from host (m.mu held).
+func (m *meters) host(format, host string) *index.Fill {
+	day := time.Now().UTC().Format(time.DateOnly)
+	if day != m.hostsDay {
+		m.hostsDay, m.seen = day, map[[2]string]bool{}
+	}
+	h := [2]string{format, host}
+	if !m.seen[h] && len(m.seen) >= maxFillHosts {
+		h[1] = "(other)"
+		m.folded++
+	} else {
+		m.seen[h] = true
+	}
+	k := [3]string{day, h[0], h[1]}
+	if m.hosts[k] == nil {
+		m.hosts[k] = &index.Fill{Day: k[0], Format: format, Host: k[2]}
+	}
+	return m.hosts[k]
+}
+
+// takeFills is the fetches by day, format and host counted since the last call,
+// and how many of them counted as "(other)".
+func (m *meters) takeFills() ([]index.Fill, int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]index.Fill, 0, len(m.hosts))
+	for _, f := range m.hosts {
+		out = append(out, *f)
+	}
+	folded := m.folded
+	m.hosts, m.folded = map[[3]string]*index.Fill{}, 0
+	return out, folded
 }
 
 var metersDoc = [][3]string{

@@ -191,14 +191,14 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 	job, fresh, err := s.fetches.join(k, t.Sub, domainOf(host), budget, now)
 	switch {
 	case errors.Is(err, errThrottled):
-		s.meters.refuse(b.Format, "throttled")
+		s.meters.refuse(b.Format, host, "throttled")
 		log.Printf("fetch %s from %s for %s: throttled", key, src, who)
 		s.record(levelWarning, "fill_throttled", host, fmt.Sprintf("fetch %s from %s: throttled", key, src))
 		midnight := now.UTC().Truncate(24 * time.Hour).Add(24 * time.Hour)
 		w.Header().Set("Retry-After", fmt.Sprint(int(midnight.Sub(now).Seconds())+1))
 		return failMsg(w, http.StatusTooManyRequests, "throttled")
 	case err != nil:
-		s.meters.refuse(b.Format, "full")
+		s.meters.refuse(b.Format, host, "full")
 		w.Header().Set("Retry-After", "30")
 		return failMsg(w, http.StatusServiceUnavailable, "full")
 	}
@@ -207,7 +207,7 @@ func (s *Server) fetchRead(w http.ResponseWriter, r *http.Request, rawQuery stri
 		go func() {
 			start := time.Now()
 			n, err := s.fetch(b.Volume, b.MaxSize, key, src, t.Sub, "")
-			s.meters.fill(b.Format, n, err)
+			s.meters.fill(b.Format, host, n, err)
 			if err != nil {
 				log.Printf("fetch %s from %s for %s failed after %d bytes, %s: %v", key, src, who, n, time.Since(start).Round(time.Millisecond), err)
 				s.record(levelError, "fill_failed", key, fmt.Sprintf("fetch %s from %s failed: %v", key, src, err))

@@ -234,6 +234,10 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   who, when and `-gc-apply`'s code. A file deleted by the service (an apply, `PUT
   /_admin/delete`) leaves its index at once; `-gc-apply` on the host leaves that to the
   next listing.
+- `GET /_admin/fills?since=<YYYY-MM-DD>`: the fetches from upstream since that day (30
+  days by default), by format and host, the most first: `ok`, `failed`, `refused` (no
+  room, or the host's budget spent) and `bytes`. Counted by day in the index (with it),
+  kept 400 days; past 1,000 hosts in a minute, the rest count as `(other)`.
 - `GET /_admin/git`: the git bindings' repositories on `-data`, the largest first: each
   one's binding, `repo` (host/path), `bytes`, `kept` (checkouts kept for builds,
   `refs/bits/*`) and when its refs were `refreshed` last (null: not since the
@@ -246,7 +250,7 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   `volume_unreachable`, `volume_request_failed`, `presign_failed`, `promote_failed`,
   `promote_conflict`, `staging_left`, `index_read_failed`, `index_write_failed`,
   `index_drift` (after a first listing), `listing_failed`, `manifests_unread`,
-  `reads_dropped`, `fill_failed`, `fill_refused`, `fill_throttled`,
+  `reads_dropped`, `fill_hosts_folded`, `fill_failed`, `fill_refused`, `fill_throttled`,
   `pypi_page_failed`, `crates_index_failed`, `git_failed`, `git_backend`, `git_upstream_down`, `tag_moved`,
   `git_no_data`, `git_missing`, `collection_failed`, `metrics_failed`,
   `config_rejected`, `disk_low` (less than a tenth of `-data`'s file system free),

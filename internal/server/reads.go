@@ -56,13 +56,30 @@ func (s *Server) flushReads(ctx context.Context) {
 	}
 }
 
-// FlushReads adds the reads counted, and the problems gathered, to the index every
-// verifyTick, never waiting on a listing. It never returns.
+// FlushReads adds the reads and fetches counted, and the problems gathered, to the
+// index every verifyTick, never waiting on a listing. It never returns.
 func (r *Reloader) FlushReads() {
 	for {
 		time.Sleep(verifyTick)
 		s := r.cur.Load()
 		s.flushReads(context.Background())
 		s.flushProblems(context.Background())
+		s.flushFills(context.Background())
+	}
+}
+
+// flushFills adds the fetches by host counted since the last call to the index.
+func (s *Server) flushFills(ctx context.Context) {
+	if s.index == nil {
+		return
+	}
+	fs, folded := s.meters.takeFills()
+	if folded > 0 {
+		s.warnf("fill_hosts_folded", "", "index: %d fetches counted as (other): more than %d hosts today", folded, maxFillHosts)
+	}
+	if len(fs) > 0 {
+		if err := s.index.AddFills(ctx, fs, s.now()); err != nil {
+			s.errorf("index_write_failed", "", "index: %d hosts' fetches lost: %v", len(fs), err)
+		}
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"net/url"
@@ -928,5 +929,65 @@ func TestAdminGit(t *testing.T) {
 	}
 	if w := doAdmin(s, "GET", "/_admin/git", map[string]string{"Authorization": "Bearer " + adminToken(t, s, "admin:bob", time.Minute, "GET /_admin/summary")}); w.Code != 403 {
 		t.Errorf("a token for the summary alone: %d", w.Code)
+	}
+}
+
+// Fetches from upstream by format and host, as the index keeps them by day; the hosts
+// past maxFillHosts a day count as "(other)", and say so.
+func TestAdminFills(t *testing.T) {
+	s, _, _, _ := gcSetup(t)
+	s.meters.fill("sources", "ftp.gnu.org", 10, nil)
+	s.meters.fill("sources", "ftp.gnu.org", 0, errors.New("timed out"))
+	s.meters.refuse("sources", "downloads.sourceforge.net", "throttled")
+	s.flushFills(context.Background())
+	s.meters.fill("sources", "ftp.gnu.org", 5, nil) // not flushed yet: the view flushes first
+	for i := 0; i <= maxFillHosts; i++ {
+		s.meters.fill("pypi", fmt.Sprintf("h%d.example.org", i), 1, nil)
+	}
+	auth := map[string]string{"Authorization": "Bearer " + adminToken(t, s, "admin:alice", time.Minute, "GET /_admin/fills")}
+	w := doAdmin(s, "GET", "/_admin/fills?since=2000-01-01", auth) // counted by the wall clock's day
+	var a struct {
+		Since string
+		Fills []index.Fill
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &a); w.Code != 200 || err != nil {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+	by := map[string]index.Fill{}
+	for _, f := range a.Fills {
+		by[f.Format+" "+f.Host] = f
+	}
+	if f := by["sources ftp.gnu.org"]; f.OK != 2 || f.Failed != 1 || f.Bytes != 15 {
+		t.Errorf("ftp.gnu.org: %+v", f)
+	}
+	if f := by["sources downloads.sourceforge.net"]; f.Refused != 1 || f.OK != 0 {
+		t.Errorf("sourceforge: %+v", f)
+	}
+	pypi := 0
+	for _, f := range a.Fills {
+		if f.Format == "pypi" {
+			pypi++
+		}
+	}
+	if pypi > maxFillHosts || by["pypi (other)"].OK == 0 {
+		t.Errorf("%d pypi hosts, (other): %+v", pypi, by["pypi (other)"])
+	}
+	s.meters.fill("pypi", "h0.example.org", 1, nil) // after a flush, the same day
+	s.meters.fill("pypi", "late.example.org", 1, nil)
+	if fs, folded := s.meters.takeFills(); len(fs) != 2 || folded != 1 {
+		t.Errorf("the next minute: %+v, %d folded", fs, folded)
+	}
+	s.flushProblems(context.Background())
+	if w := doAdmin(s, "GET", "/_admin/problems", map[string]string{"Authorization": "Bearer " + adminToken(t, s, "admin:alice", time.Minute, "GET /_admin/problems")}); !strings.Contains(w.Body.String(), "fill_hosts_folded") {
+		t.Errorf("no fill_hosts_folded problem: %s", w.Body)
+	}
+	if want := s.now().UTC().AddDate(0, 0, -29).Format(time.DateOnly); !strings.Contains(doAdmin(s, "GET", "/_admin/fills", auth).Body.String(), `"since":"`+want+`"`) {
+		t.Errorf("since: not 30 days by default")
+	}
+	if w := doAdmin(s, "GET", "/_admin/fills?since=yesterday", auth); w.Code != 400 {
+		t.Errorf("since=yesterday: %d", w.Code)
+	}
+	if w := doAdmin(s, "GET", "/_admin/fills?since=2100-01-01", auth); w.Code != 200 || !strings.Contains(w.Body.String(), `"fills":[]`) {
+		t.Errorf("since a day to come: %d %s", w.Code, w.Body)
 	}
 }

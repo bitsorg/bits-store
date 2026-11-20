@@ -89,9 +89,14 @@ CREATE TABLE IF NOT EXISTS problems (  -- the service's warnings and errors (pro
   count   INTEGER NOT NULL,
   level   TEXT NOT NULL, kind TEXT NOT NULL, subject TEXT NOT NULL, message TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS problems_by_kind ON problems (kind, subject, last);
-CREATE INDEX IF NOT EXISTS problems_by_last ON problems (last, id);`
+CREATE INDEX IF NOT EXISTS problems_by_last ON problems (last, id);
+CREATE TABLE IF NOT EXISTS fills (  -- fetches from upstream by day, format and host (fills.go)
+  day     TEXT NOT NULL, format TEXT NOT NULL, host TEXT NOT NULL,
+  ok      INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0,
+  refused INTEGER NOT NULL DEFAULT 0, bytes INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, format, host)) WITHOUT ROWID;`
 
-var tables = []string{"objects", "verified", "manifests", "manifest_builds", "manifest_entries", "meta", "problems"}
+var tables = []string{"objects", "verified", "manifests", "manifest_builds", "manifest_entries", "meta", "problems", "fills"}
 
 // Open opens (or creates) the index file at path.
 func Open(path string) (*Index, error) {

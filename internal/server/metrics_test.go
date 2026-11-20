@@ -117,9 +117,9 @@ func TestMeters(t *testing.T) {
 	do(s, "GET", "/store/lhcb/x86_64-el10/a", nil) // a binding, no token
 	do(s, "GET", "/nowhere/a", nil)                // no binding
 	do(s, "GET", "/health", nil)                   // not counted
-	s.meters.fill("sources", 10, nil)
-	s.meters.fill("git", 0, errors.New("upstream down"))
-	s.meters.refuse("pypi", "full")
+	s.meters.fill("sources", "example.org", 10, nil)
+	s.meters.fill("git", "github.com", 0, errors.New("upstream down"))
+	s.meters.refuse("pypi", "files.pythonhosted.org", "full")
 	w := do(s, "GET", "/metrics", nil)
 	for _, want := range []string{
 		`bits_store_requests_total{binding="/store/lhcb/x86_64-el10",format="blob",method="GET",code="401"} 1` + "\n",
