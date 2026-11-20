@@ -407,7 +407,8 @@ var searchScan = 100000 // rows a search looks at, at most, before it answers wi
 
 // adminObjects searches one binding (?binding=<prefix>) from the index: under a
 // folder (under), by text in the key (q), manifest kind (kind), write date (since,
-// before), the collection's verdict (kept); after a key (after), limit rows. Each
+// before), the collection's verdict (kept); after a key (after), limit rows; or the
+// first limit rows by order (reads, written), without next. Each
 // filter is applied here, so searchScan bounds the rows looked at; the answer's next
 // continues it ("" at the end).
 func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery string) int {
@@ -430,12 +431,15 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery s
 		prefix = strings.TrimPrefix(prefix+"/"+u, "/")
 	}
 	text, after, kind, kept, limit := strings.ToLower(q.Get("q")), q.Get("after"), q.Get("kind"), q.Get("kept"), 100
+	order := q.Get("order")
 	var since, before time.Time
 	switch {
 	case len(text) > 200:
 		return failMsg(w, http.StatusBadRequest, "q")
-	case after != "" && !strings.HasPrefix(after, strings.TrimPrefix(prefix+"/", "/")):
+	case after != "" && (order != "" || !strings.HasPrefix(after, strings.TrimPrefix(prefix+"/", "/"))):
 		return failMsg(w, http.StatusBadRequest, "after")
+	case order != "" && order != index.OrderReads && order != index.OrderWritten:
+		return failMsg(w, http.StatusBadRequest, "order")
 	case kind != "" && (b.Format != "manifests" || !slices.Contains([]string{index.KindBOM, index.KindCommon, "none"}, kind)):
 		return failMsg(w, http.StatusBadRequest, "kind")
 	case kept != "" && (b.Format != "tarballs" || !slices.Contains(whys, kept)):
@@ -462,9 +466,15 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery s
 		}
 	}
 	rows, next, last, scanned := []ObjectRow{}, "", "", 0
-	err = s.index.Search(r.Context(), bucket, prefix, after, func(o index.Object, k string) bool {
+	paged, max := order == "", 0 // in another order, the first rows only: a bounded sort
+	if !paged {
+		max = searchScan + 1
+	}
+	err = s.index.Search(r.Context(), bucket, prefix, after, order, max, func(o index.Object, k string) bool {
 		if scanned++; scanned > searchScan {
-			next = last // looked at enough: the rest after it
+			if paged {
+				next = last // looked at enough: the rest after it
+			}
 			return false
 		}
 		last = o.Key
@@ -477,7 +487,9 @@ func (s *Server) adminObjects(w http.ResponseWriter, r *http.Request, rawQuery s
 		}
 		row := objectRow(b, o, verdicts[o.Key])
 		if len(rows) == limit {
-			next = rows[limit-1].Key // a row more: the rest after the last one sent
+			if paged {
+				next = rows[limit-1].Key // a row more: the rest after the last one sent
+			}
 			return false
 		}
 		rows = append(rows, row)

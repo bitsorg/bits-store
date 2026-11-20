@@ -288,6 +288,23 @@ func TestAdminObjects(t *testing.T) {
 	if rows, _ := get(200, "q="+url.QueryEscape("über-readme")+"&binding="+url.QueryEscape(tars)); keys(rows) != "el9/Über-README" {
 		t.Errorf("any case: %q", keys(rows))
 	}
+	// The most read and the newest first: the first rows, without next.
+	x.AddReads(ctx, map[[2]string]index.Read{{at, "TT/el9/store/cc/cc33/c-1-1.el9.tar.gz"}: {N: 5, Last: s.now()},
+		{at, "TT/el9/dist/x"}: {N: 2, Last: s.now()}})
+	if rows, next := get(200, "order=reads&limit=2&binding="+url.QueryEscape(tars)); keys(rows) != "el9/store/cc/cc33/c-1-1.el9.tar.gz el9/dist/x" || next != "" {
+		t.Errorf("most read: %q %q", keys(rows), next)
+	}
+	newest := all[0]
+	for _, r := range all {
+		if r.Written.After(newest.Written) {
+			newest = r
+		}
+	}
+	if rows, _ := get(200, "order=written&limit=1&binding="+url.QueryEscape(tars)); len(rows) != 1 || !rows[0].Written.Equal(newest.Written) {
+		t.Errorf("newest first: %q, want written %v", keys(rows), newest.Written)
+	}
+	get(400, "order=size&binding="+url.QueryEscape(tars))
+	get(400, "order=reads&after="+url.QueryEscape("TT/el9")+"&binding="+url.QueryEscape(tars))
 	get(404, "binding=/nowhere")
 	only := map[string]string{"Authorization": "Bearer " + adminToken(t, s, "admin:bob", time.Minute, "GET /_admin/summary")}
 	if w := doAdmin(s, "GET", "/_admin/objects?binding="+url.QueryEscape(tars), only); w.Code != 403 {

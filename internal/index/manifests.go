@@ -288,9 +288,10 @@ func (x *Index) Tally(ctx context.Context, bucket, prefix string, since time.Tim
 }
 
 // Search calls fn with the bucket's objects under prefix (as Each) after a key, in
-// key order, with their SHA-256, writer group and manifest kind ("" when not read as
-// one), until fn returns false.
-func (x *Index) Search(ctx context.Context, bucket, prefix, after string, fn func(o Object, kind string) bool) error {
+// key order (or by order: OrderReads, most read first; OrderWritten, newest first),
+// with their SHA-256, writer group and manifest kind ("" when not read as one),
+// until fn returns false; max rows at most (0: all), which bounds an order's sort.
+func (x *Index) Search(ctx context.Context, bucket, prefix, after, order string, max int, fn func(o Object, kind string) bool) error {
 	where, args := "", []any{bucket}
 	if prefix != "" {
 		where, args = " AND o.key >= ? AND o.key < ?", append(args, prefix+"/", prefix+"0")
@@ -298,10 +299,13 @@ func (x *Index) Search(ctx context.Context, bucket, prefix, after string, fn fun
 	if after != "" {
 		where, args = where+" AND o.key > ?", append(args, after)
 	}
+	if max <= 0 {
+		max = -1 // SQLite: no limit
+	}
 	rows, err := x.db.QueryContext(ctx, `SELECT o.key, o.size, o.etag, o.mtime, coalesce(o.sha256, ''), o.reads,
 		o.read_at, o.grp, coalesce(m.kind, '') FROM objects o
 		LEFT JOIN manifests m ON m.bucket = o.bucket AND m.key = o.key
-		WHERE o.bucket = ?`+where+` ORDER BY o.key`, args...)
+		WHERE o.bucket = ?`+where+` ORDER BY `+orders[order]+` LIMIT ?`, append(args, max)...)
 	if err != nil {
 		return err
 	}
@@ -323,6 +327,14 @@ func (x *Index) Search(ctx context.Context, bucket, prefix, after string, fn fun
 	}
 	return rows.Err()
 }
+
+// A search's orders: by key, most read first, newest first.
+const (
+	OrderReads   = "reads"
+	OrderWritten = "written"
+)
+
+var orders = map[string]string{"": "o.key", OrderReads: "o.reads DESC, o.key", OrderWritten: "o.mtime DESC, o.key"}
 
 // Listing is a manifest listing a package: its key, kind, the builds it names, and
 // whether one of the manifest keys verifies it (a common manifest's .sig).
