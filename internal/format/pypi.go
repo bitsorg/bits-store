@@ -16,6 +16,8 @@ type PyPI struct{}
 var (
 	pypiProject = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 	sha256Hex   = regexp.MustCompile(`^[0-9a-f]{64}$`)
+	// a wheel, or an sdist in any archive pip unpacks (older releases: .tar.bz2 only)
+	pypiFile = regexp.MustCompile(`\.(whl|zip|tar|tar\.gz|tgz|tar\.bz2|tbz|tar\.xz|txz|tlz|tar\.lz|tar\.lzma)$`)
 )
 
 func (PyPI) Name() string { return "pypi" }
@@ -24,7 +26,7 @@ func (PyPI) Route(rest []string) (Item, error) {
 	switch {
 	case len(rest) == 2 && rest[0] == "simple" && pypiProject.MatchString(rest[1]):
 	case len(rest) == 4 && rest[0] == "files" && pypiProject.MatchString(rest[1]) && sha256Hex.MatchString(rest[2]) &&
-		(strings.HasSuffix(rest[3], ".whl") || strings.HasSuffix(rest[3], ".tar.gz") || strings.HasSuffix(rest[3], ".zip")):
+		pypiFile.MatchString(rest[3]):
 	default:
 		return Item{}, errors.New("not simple/<project> nor files/<project>/<sha256>/<wheel or sdist>")
 	}

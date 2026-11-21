@@ -81,7 +81,9 @@ Design: bits-services ADR 0004. One static Go binary: `make build`, `make test`.
   name as PEP 503 normalises it; `Accept: application/vnd.pypi.simple.v1+json`, else
   `406`) answers the index's page,
   asked again after 10 minutes and served as last read while the index cannot answer;
-  its files with a SHA-256 link to `<prefix>/files/<project>/<sha256>/<file>`. A file
+  its files with a SHA-256 link to `<prefix>/files/<project>/<sha256>/<file>` (a wheel, or
+  an sdist in any archive pip unpacks: `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tbz`,
+  `.tar.xz`, `.txz`, `.tlz`, `.tar.lz`, `.tar.lzma`). A file
   the store holds is read from it; one it does not is sent to the index's URL (`302`)
   while the store fetches it, once, keeping it only when its SHA-256 is the one listed
   (`max_size`, the fetch budgets as for `sources`: make the files' host, `pythonhosted.org`,

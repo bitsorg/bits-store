@@ -61,10 +61,12 @@ func TestPyPI(t *testing.T) {
 			fmt.Fprintf(w, `{"files": [
 				{"filename": %q, "url": "../../f/%s#sha256=%s", "hashes": {"sha256": %q}, "requires-python": ">=3.8", "yanked": "broken"},
 				{"filename": %q, "url": "/f/%s", "hashes": {"sha256": %q}},
+				{"filename": "demo_pkg-0.9.tar.bz2", "url": "/f/old", "hashes": {"sha256": %q}},
+				{"filename": "demo_pkg-0.9.tar.bz2.asc", "url": "/f/sig", "hashes": {"sha256": %q}},
 				{"filename": "nohash-1.0.tar.gz", "url": "/f/nohash", "hashes": {}},
 				{"filename": "ftp-1.0.tar.gz", "url": "ftp://example.org/ftp-1.0.tar.gz", "hashes": {"sha256": %q}},
 				{"filename": "bad name-1.0.tar.gz", "url": "/f/bad", "hashes": {"sha256": %q}}]}`,
-				whl, whl, sha, sha, bad, bad, strings.Repeat("ab", 32), sha, sha)
+				whl, whl, sha, sha, bad, bad, strings.Repeat("ab", 32), sha, sha, sha, sha)
 		case "/f/" + whl:
 			w.Write(data)
 		case "/f/" + bad:
@@ -94,7 +96,8 @@ func TestPyPI(t *testing.T) {
 			Yanked         json.RawMessage `json:"yanked"`
 		}
 	}
-	if json.Unmarshal(w.Body.Bytes(), &page); w.Code != 200 || w.Header().Get("Content-Type") != pypiJSON || len(page.Files) != 2 {
+	if json.Unmarshal(w.Body.Bytes(), &page); w.Code != 200 || w.Header().Get("Content-Type") != pypiJSON || len(page.Files) != 3 ||
+		page.Files[2].Filename != "demo_pkg-0.9.tar.bz2" { // an old sdist too; not its signature
 		t.Fatalf("the page: %d %s", w.Code, w.Body)
 	}
 	f := page.Files[0]
